@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Theo Dõi Tư Thế Ngồi AIoT (ESP32-S3 CAM)</title>
+    <!-- Google Fonts & Font Awesome -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --primary: #3b82f6;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-sub: #94a3b8;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background: radial-gradient(circle at 50% 0%, #1e293b 0%, var(--bg-color) 75%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto 20px auto;
+            padding: 15px 25px;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand i {
+            font-size: 28px;
+            color: var(--primary);
+        }
+
+        .brand-text h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-text p {
+            font-size: 12px;
+            color: var(--text-sub);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .audio-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            background: #334155;
+            color: var(--text-sub);
+        }
+
+        .audio-btn.enabled {
+            background: linear-gradient(135deg, #059669, #10b981);
+            color: white;
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.4);
+        }
+
+        .audio-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            gap: 20px;
+            flex: 1;
+        }
+
+        .video-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .card-header {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .live-tag {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--danger);
+        }
+
+        .pulse-dot {
+            width: 9px;
+            height: 9px;
+            background: var(--danger);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.4; }
+            100% { transform: scale(0.9); opacity: 1; }
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            height: 480px;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .video-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 18px 20px;
+            backdrop-filter: blur(12px);
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-sub);
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+        .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+        .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease, background-color 0.3s ease;
+        }
+
+        .alert-box {
+            padding: 16px;
+            border-radius: 14px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .alert-box.active {
+            animation: alertShake 0.5s ease-in-out infinite alternate;
+        }
+
+        @keyframes alertShake {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(-3px); }
+        }
+
+        .alert-icon {
+            font-size: 20px;
+            color: var(--danger);
+            margin-top: 2px;
+        }
+
+        .alert-content h4 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--danger);
+            margin-bottom: 4px;
+        }
+
+        .alert-content p {
+            font-size: 13px;
+            color: #cbd5e1;
+            line-height: 1.4;
+        }
+
+        footer {
+            max-width: 1200px;
+            width: 100%;
+            margin: 20px auto 0 auto;
+            text-align: center;
+            font-size: 13px;
+            color: var(--text-sub);
+        }
+
+        @media (max-width: 900px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+            .video-wrapper {
+                height: 360px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <i class="fa-solid fa-person-burst"></i>
+            <div class="brand-text">
+                <h1>AIoT Posture Guardian</h1>
+                <p>ESP32-S3 CAM • MediaPipe Pose Cloud • Cảnh Báo Giọng Nói</p>
+            </div>
+        </div>
+        <div class="header-actions">
+            <button id="audioToggleBtn" class="audio-btn" onclick="toggleAudio()">
+                <i class="fa-solid fa-volume-xmark"></i>
+                <span>Bật âm thanh cảnh báo</span>
+            </button>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Khu vực hiển thị Video Stream -->
+        <div class="video-card">
+            <div class="card-header">
+                <div class="live-tag">
+                    <div class="pulse-dot"></div>
+                    <span>ESP32-S3 CAM LIVE STREAM</span>
+                </div>
+                <div id="connStatus" class="badge badge-warning">Đang kết nối...</div>
+            </div>
+            <div class="video-wrapper">
+                <img src="/video_feed" alt="Video stream từ ESP32-S3 CAM" onerror="this.src=''">
+            </div>
+        </div>
+
+        <!-- Bảng thông số Real-time -->
+        <div class="sidebar">
+            <!-- Trạng thái tư thế -->
+            <div class="stat-card">
+                <div class="stat-label">
+                    <span>TRẠNG THÁI TƯ THẾ</span>
+                    <i class="fa-solid fa-chart-simple"></i>
+                </div>
+                <div id="postureStatusText" class="stat-value" style="color: var(--primary);">Đang kiểm tra...</div>
+                <div id="postureTimeDetail" style="font-size: 13px; color: var(--text-sub); margin-top: 6px;">Thời gian: 0s</div>
+            </div>
+
+            <!-- Góc nghiêng Cổ -->
+            <div class="stat-card">
+                <div class="stat-label">
+                    <span>GÓC NGHIÊNG CỔ (Tiêu chuẩn: &lt; 40°)</span>
+                    <span id="neckValText">0°</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="neckBar" class="progress-fill" style="width: 0%; background: var(--success);"></div>
+                </div>
+            </div>
+
+            <!-- Góc nghiêng Lưng -->
+            <div class="stat-card">
+                <div class="stat-label">
+                    <span>GÓC NGHIÊNG LƯNG (Tiêu chuẩn: &lt; 10°)</span>
+                    <span id="torsoValText">0°</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="torsoBar" class="progress-fill" style="width: 0%; background: var(--success);"></div>
+                </div>
+            </div>
+
+            <!-- Hộp cảnh báo giọng nói -->
+            <div id="alertBox" class="alert-box" style="display: none;">
+                <i class="fa-solid fa-triangle-exclamation alert-icon"></i>
+                <div class="alert-content">
+                    <h4>CẢNH BÁO TƯ THẾ!</h4>
+                    <p id="alertReason">Bạn đang cúi quá nhiều. Hãy ngồi thẳng lưng và điều chỉnh màn hình.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        ✨ Hệ thống AIoT Nhận diện tư thế ngồi độc lập • Đồ án IoT 2026 ✨
+    </footer>
+
+    <!-- Thẻ Audio phát tiếng cảnh báo -->
+    <audio id="ttsAudio" preload="auto"></audio>
+
+    <script>
+        let isAudioAllowed = false;
+        let lastSpokenTime = 0;
+        const SPEAK_COOLDOWN_MS = 8000;
+
+        function toggleAudio() {
+            const btn = document.getElementById("audioToggleBtn");
+            const icon = btn.querySelector("i");
+            const text = btn.querySelector("span");
+
+            if (!isAudioAllowed) {
+                isAudioAllowed = true;
+                btn.classList.add("enabled");
+                icon.className = "fa-solid fa-volume-high";
+                text.innerText = "Âm thanh: ĐANG BẬT";
+
+                playTTS("Hệ thống cảnh báo tư thế đã sẵn sàng");
+            } else {
+                isAudioAllowed = false;
+                btn.classList.remove("enabled");
+                icon.className = "fa-solid fa-volume-xmark";
+                text.innerText = "Bật âm thanh cảnh báo";
+            }
+        }
+
+        function playTTS(text) {
+            if (!isAudioAllowed) return;
+
+            const now = Date.now();
+            if (now - lastSpokenTime < SPEAK_COOLDOWN_MS) {
+                return;
+            }
+            lastSpokenTime = now;
+
+            const audioEl = document.getElementById("ttsAudio");
+            const encoded = encodeURIComponent(text);
+            audioEl.src = `/api/tts?text=${encoded}`;
+            audioEl.play().catch(e => {
+                console.warn("Lỗi phát audio qua API, chuyển sang speechSynthesis:", e);
+                if ('speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.lang = 'vi-VN';
+                    window.speechSynthesis.speak(utterance);
+                }
+            });
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/status');
+                if (!response.ok) return;
+                const data = await response.json();
+
+                const connEl = document.getElementById("connStatus");
+                if (data.is_connected) {
+                    connEl.className = "badge badge-success";
+                    connEl.innerText = "ESP32-S3 ĐÃ KẾT NỐI";
+                } else {
+                    connEl.className = "badge badge-danger";
+                    connEl.innerText = "CHỜ TÍN HIỆU CAM...";
+                }
+
+                const statusTextEl = document.getElementById("postureStatusText");
+                const timeDetailEl = document.getElementById("postureTimeDetail");
+                statusTextEl.innerText = data.status;
+
+                if (data.status === "Đúng tư thế") {
+                    statusTextEl.style.color = "var(--success)";
+                    timeDetailEl.innerText = `Duy trì đúng tư thế: ${data.posture_time}s`;
+                } else if (data.status === "Sai tư thế") {
+                    statusTextEl.style.color = "var(--danger)";
+                    timeDetailEl.innerText = `Sai tư thế liên tục: ${data.posture_time}s`;
+                } else {
+                    statusTextEl.style.color = "var(--warning)";
+                    timeDetailEl.innerText = "Đang tìm cơ thể...";
+                }
+
+                const neckVal = data.neck_angle || 0;
+                document.getElementById("neckValText").innerText = `${neckVal}°`;
+                const neckPercent = Math.min(100, (neckVal / 60) * 100);
+                const neckBar = document.getElementById("neckBar");
+                neckBar.style.width = `${neckPercent}%`;
+                neckBar.style.backgroundColor = neckVal >= 40 ? "var(--danger)" : "var(--success)";
+
+                const torsoVal = data.torso_angle || 0;
+                document.getElementById("torsoValText").innerText = `${torsoVal}°`;
+                const torsoPercent = Math.min(100, (torsoVal / 30) * 100);
+                const torsoBar = document.getElementById("torsoBar");
+                torsoBar.style.width = `${torsoPercent}%`;
+                torsoBar.style.backgroundColor = torsoVal >= 10 ? "var(--danger)" : "var(--success)";
+
+                const alertBox = document.getElementById("alertBox");
+                const alertReason = document.getElementById("alertReason");
+
+                if (data.alert && data.error_message) {
+                    alertBox.style.display = "flex";
+                    alertBox.classList.add("active");
+                    alertReason.innerText = `Cảnh báo: ${data.error_message}. Hãy ngồi thẳng lưng lại!`;
+
+                    const voiceMessage = `Cảnh báo! Bạn đang ngồi sai tư thế. ${data.error_message}. Hãy ngồi thẳng lưng lại.`;
+                    playTTS(voiceMessage);
+                } else {
+                    alertBox.style.display = "none";
+                    alertBox.classList.remove("active");
+                }
+
+            } catch (err) {
+                console.error("Lỗi cập nhật status:", err);
+            }
+        }
+
+        setInterval(fetchStatus, 1000);
+        fetchStatus();
+    </script>
+</body>
+</html>

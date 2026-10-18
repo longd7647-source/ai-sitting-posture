@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: ai-sitting-posture
+    env: docker
+    plan: free
+    dockerfilePath: Dockerfile
