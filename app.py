@@ -7,7 +7,17 @@ import time
 app = Flask(__name__)
 
 # Khởi tạo MediaPipe Pose Lite siêu nhẹ chạy mượt trên Cloud
-mp_pose = mp.solutions.pose
+import mediapipe as mp
+try:
+    import mediapipe.python.solutions.pose as mp_pose
+except ImportError:
+    mp_pose = mp.solutions.pose
+
+pose = mp_pose.Pose(
+    static_image_mode=True,
+    model_complexity=0,
+    min_detection_confidence=0.5
+)
 pose = mp_pose.Pose(
     static_image_mode=True,
     model_complexity=0,
