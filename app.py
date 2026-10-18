@@ -1,23 +1,18 @@
 from flask import Flask, request, jsonify
 import cv2
 import numpy as np
-import mediapipe as mp
 import time
 
-app = Flask(__name__)
-
-# Khởi tạo MediaPipe Pose Lite siêu nhẹ chạy mượt trên Cloud
+# Import MediaPipe chuẩn trên Linux tránh lỗi 'no attribute solutions'
 import mediapipe as mp
 try:
     import mediapipe.python.solutions.pose as mp_pose
 except ImportError:
     mp_pose = mp.solutions.pose
 
-pose = mp_pose.Pose(
-    static_image_mode=True,
-    model_complexity=0,
-    min_detection_confidence=0.5
-)
+app = Flask(__name__)
+
+# Khởi tạo model Pose
 pose = mp_pose.Pose(
     static_image_mode=True,
     model_complexity=0,
