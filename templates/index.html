@@ -210,6 +210,7 @@
         .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
         .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
         .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+        .badge-info { background: rgba(59, 130, 246, 0.2); color: var(--primary); }
 
         .progress-bar {
             width: 100%;
@@ -291,7 +292,7 @@
             <i class="fa-solid fa-person-burst"></i>
             <div class="brand-text">
                 <h1>AIoT Posture Guardian</h1>
-                <p>ESP32-S3 CAM • MediaPipe Pose Cloud • Cảnh Báo Giọng Nói</p>
+                <p>ESP32-S3 CAM • Đa Góc Cam Thông Minh • Cảnh Báo Giọng Nói</p>
             </div>
         </div>
         <div class="header-actions">
@@ -310,7 +311,10 @@
                     <div class="pulse-dot"></div>
                     <span>ESP32-S3 CAM LIVE STREAM</span>
                 </div>
-                <div id="connStatus" class="badge badge-warning">Đang kết nối...</div>
+                <div style="display: flex; gap: 8px;">
+                    <div id="cameraViewBadge" class="badge badge-info"><i class="fa-solid fa-video"></i> Nhận diện góc cam...</div>
+                    <div id="connStatus" class="badge badge-warning">Đang kết nối...</div>
+                </div>
             </div>
             <div class="video-wrapper">
                 <img src="/video_feed" alt="Video stream từ ESP32-S3 CAM" onerror="this.src=''">
@@ -319,6 +323,16 @@
 
         <!-- Bảng thông số Real-time -->
         <div class="sidebar">
+            <!-- Vị trí Camera tự động nhận diện -->
+            <div class="stat-card">
+                <div class="stat-label">
+                    <span>GÓC QUAY CAMERA (AUTO-DETECT)</span>
+                    <i class="fa-solid fa-camera-rotate"></i>
+                </div>
+                <div id="cameraViewText" class="stat-value" style="font-size: 19px; color: var(--primary);">Đang phân tích...</div>
+                <div style="font-size: 12px; color: var(--text-sub); margin-top: 4px;">Tự thích ứng theo vị trí đặt camera</div>
+            </div>
+
             <!-- Trạng thái tư thế -->
             <div class="stat-card">
                 <div class="stat-label">
@@ -332,7 +346,7 @@
             <!-- Góc nghiêng Cổ -->
             <div class="stat-card">
                 <div class="stat-label">
-                    <span>GÓC NGHIÊNG CỔ (Tiêu chuẩn: &lt; 40°)</span>
+                    <span id="neckLabel">GÓC CỔ (TAI - VAI)</span>
                     <span id="neckValText">0°</span>
                 </div>
                 <div class="progress-bar">
@@ -343,7 +357,7 @@
             <!-- Góc nghiêng Lưng -->
             <div class="stat-card">
                 <div class="stat-label">
-                    <span>GÓC NGHIÊNG LƯNG (Tiêu chuẩn: &lt; 10°)</span>
+                    <span id="torsoLabel">GÓC LƯNG / ĐỘ LỆCH VAI</span>
                     <span id="torsoValText">0°</span>
                 </div>
                 <div class="progress-bar">
@@ -356,14 +370,14 @@
                 <i class="fa-solid fa-triangle-exclamation alert-icon"></i>
                 <div class="alert-content">
                     <h4>CẢNH BÁO TƯ THẾ!</h4>
-                    <p id="alertReason">Bạn đang cúi quá nhiều. Hãy ngồi thẳng lưng và điều chỉnh màn hình.</p>
+                    <p id="alertReason">Bạn đang ngồi sai tư thế. Hãy điều chỉnh lại dáng ngồi.</p>
                 </div>
             </div>
         </div>
     </div>
 
     <footer>
-        ✨ Hệ thống AIoT Nhận diện tư thế ngồi độc lập • Đồ án IoT 2026 ✨
+        ✨ Hệ thống AIoT Nhận diện tư thế ngồi thông minh đa góc quay • Đồ án IoT 2026 ✨
     </footer>
 
     <!-- Thẻ Audio phát tiếng cảnh báo -->
@@ -422,6 +436,7 @@
                 if (!response.ok) return;
                 const data = await response.json();
 
+                // Cập nhật trạng thái kết nối
                 const connEl = document.getElementById("connStatus");
                 if (data.is_connected) {
                     connEl.className = "badge badge-success";
@@ -431,6 +446,21 @@
                     connEl.innerText = "CHỜ TÍN HIỆU CAM...";
                 }
 
+                // Cập nhật góc Camera tự động
+                const camView = data.camera_view || "Đang phân tích...";
+                document.getElementById("cameraViewBadge").innerText = `📷 ${camView}`;
+                document.getElementById("cameraViewText").innerText = camView;
+
+                // Tùy chỉnh nhãn theo góc cam
+                if (camView.includes("Chính diện")) {
+                    document.getElementById("neckLabel").innerText = "ĐỘ NGHIÊNG ĐẦU (Vẹo cổ: < 14°)";
+                    document.getElementById("torsoLabel").innerText = "ĐỘ LỆCH HAI VAI (< 10°)";
+                } else {
+                    document.getElementById("neckLabel").innerText = "GÓC CỔ TAI - VAI (Chuẩn: < 32°)";
+                    document.getElementById("torsoLabel").innerText = "GÓC LƯNG / THÂN TRÊN";
+                }
+
+                // Cập nhật tình trạng tư thế
                 const statusTextEl = document.getElementById("postureStatusText");
                 const timeDetailEl = document.getElementById("postureTimeDetail");
                 statusTextEl.innerText = data.status;
@@ -446,20 +476,23 @@
                     timeDetailEl.innerText = "Đang tìm cơ thể...";
                 }
 
+                // Cập nhật thanh góc cổ
                 const neckVal = data.neck_angle || 0;
                 document.getElementById("neckValText").innerText = `${neckVal}°`;
-                const neckPercent = Math.min(100, (neckVal / 60) * 100);
+                const neckPercent = Math.min(100, (neckVal / 50) * 100);
                 const neckBar = document.getElementById("neckBar");
                 neckBar.style.width = `${neckPercent}%`;
-                neckBar.style.backgroundColor = neckVal >= 40 ? "var(--danger)" : "var(--success)";
+                neckBar.style.backgroundColor = neckVal >= 32 ? "var(--danger)" : "var(--success)";
 
+                // Cập nhật thanh góc lưng
                 const torsoVal = data.torso_angle || 0;
                 document.getElementById("torsoValText").innerText = `${torsoVal}°`;
                 const torsoPercent = Math.min(100, (torsoVal / 30) * 100);
                 const torsoBar = document.getElementById("torsoBar");
                 torsoBar.style.width = `${torsoPercent}%`;
-                torsoBar.style.backgroundColor = torsoVal >= 10 ? "var(--danger)" : "var(--success)";
+                torsoBar.style.backgroundColor = torsoVal >= 18 ? "var(--danger)" : "var(--success)";
 
+                // Xử lý cảnh báo âm thanh và hiển thị hộp cảnh báo
                 const alertBox = document.getElementById("alertBox");
                 const alertReason = document.getElementById("alertReason");
 
