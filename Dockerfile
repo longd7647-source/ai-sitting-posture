@@ -23,4 +23,4 @@ ENV PORT=10000
 EXPOSE 10000
 
 # Khởi chạy Gunicorn với 1 worker và 4 threads (bắt buộc 1 worker để chia sẻ bộ nhớ MJPEG và State)
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "4", "--timeout", "120"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "8", "--timeout", "120"]

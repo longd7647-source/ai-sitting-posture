@@ -171,6 +171,25 @@
             object-fit: contain;
         }
 
+        .video-overlay-badge {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #38bdf8;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            pointer-events: none;
+            z-index: 5;
+        }
+
         .sidebar {
             display: flex;
             flex-direction: column;
@@ -317,7 +336,8 @@
                 </div>
             </div>
             <div class="video-wrapper">
-                <img src="/video_feed" alt="Video stream từ ESP32-S3 CAM" onerror="this.src=''">
+                <img id="videoFeed" src="/api/latest_frame" alt="Video stream từ ESP32-S3 CAM">
+                <div class="video-overlay-badge" id="fpsBadge"><i class="fa-solid fa-bolt"></i> Đang kết nối...</div>
             </div>
         </div>
 
@@ -436,7 +456,6 @@
                 if (!response.ok) return;
                 const data = await response.json();
 
-                // Cập nhật trạng thái kết nối
                 const connEl = document.getElementById("connStatus");
                 if (data.is_connected) {
                     connEl.className = "badge badge-success";
@@ -446,12 +465,10 @@
                     connEl.innerText = "CHỜ TÍN HIỆU CAM...";
                 }
 
-                // Cập nhật góc Camera tự động
                 const camView = data.camera_view || "Đang phân tích...";
                 document.getElementById("cameraViewBadge").innerText = `📷 ${camView}`;
                 document.getElementById("cameraViewText").innerText = camView;
 
-                // Tùy chỉnh nhãn theo góc cam
                 if (camView.includes("Chính diện")) {
                     document.getElementById("neckLabel").innerText = "ĐỘ NGHIÊNG ĐẦU (Vẹo cổ: < 14°)";
                     document.getElementById("torsoLabel").innerText = "ĐỘ LỆCH HAI VAI (< 10°)";
@@ -460,7 +477,6 @@
                     document.getElementById("torsoLabel").innerText = "GÓC LƯNG / THÂN TRÊN";
                 }
 
-                // Cập nhật tình trạng tư thế
                 const statusTextEl = document.getElementById("postureStatusText");
                 const timeDetailEl = document.getElementById("postureTimeDetail");
                 statusTextEl.innerText = data.status;
@@ -476,7 +492,6 @@
                     timeDetailEl.innerText = "Đang tìm cơ thể...";
                 }
 
-                // Cập nhật thanh góc cổ
                 const neckVal = data.neck_angle || 0;
                 document.getElementById("neckValText").innerText = `${neckVal}°`;
                 const neckPercent = Math.min(100, (neckVal / 50) * 100);
@@ -484,7 +499,6 @@
                 neckBar.style.width = `${neckPercent}%`;
                 neckBar.style.backgroundColor = neckVal >= 32 ? "var(--danger)" : "var(--success)";
 
-                // Cập nhật thanh góc lưng
                 const torsoVal = data.torso_angle || 0;
                 document.getElementById("torsoValText").innerText = `${torsoVal}°`;
                 const torsoPercent = Math.min(100, (torsoVal / 30) * 100);
@@ -492,7 +506,6 @@
                 torsoBar.style.width = `${torsoPercent}%`;
                 torsoBar.style.backgroundColor = torsoVal >= 18 ? "var(--danger)" : "var(--success)";
 
-                // Xử lý cảnh báo âm thanh và hiển thị hộp cảnh báo
                 const alertBox = document.getElementById("alertBox");
                 const alertReason = document.getElementById("alertReason");
 
@@ -513,8 +526,59 @@
             }
         }
 
+        // Bộ nạp luồng video thích ứng mượt mà (HTTP/2 Double-Buffering)
+        let isStreamActive = true;
+        let isFetchingFrame = false;
+        let frameCount = 0;
+        let lastFpsTime = Date.now();
+
+        function initResilientStream() {
+            const videoEl = document.getElementById("videoFeed");
+            const fpsBadge = document.getElementById("fpsBadge");
+            if (!videoEl) return;
+
+            function fetchNextFrame() {
+                if (!isStreamActive || isFetchingFrame) return;
+                isFetchingFrame = true;
+
+                const nextImg = new Image();
+                const timestamp = Date.now();
+                nextImg.src = `/api/latest_frame?t=${timestamp}`;
+
+                nextImg.onload = function() {
+                    videoEl.src = nextImg.src;
+                    isFetchingFrame = false;
+
+                    frameCount++;
+                    const now = Date.now();
+                    if (now - lastFpsTime >= 1000) {
+                        const currentFps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+                        frameCount = 0;
+                        lastFpsTime = now;
+                        if (fpsBadge) {
+                            fpsBadge.innerHTML = `<i class="fa-solid fa-bolt"></i> Live • ${currentFps} FPS`;
+                        }
+                    }
+
+                    // Tần số nạp frame tiếp theo: 80ms giúp bắt kịp mọi frame từ ESP32
+                    setTimeout(fetchNextFrame, 80);
+                };
+
+                nextImg.onerror = function() {
+                    isFetchingFrame = false;
+                    if (fpsBadge) {
+                        fpsBadge.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Chờ tín hiệu...`;
+                    }
+                    setTimeout(fetchNextFrame, 400);
+                };
+            }
+
+            fetchNextFrame();
+        }
+
         setInterval(fetchStatus, 1000);
         fetchStatus();
+        initResilientStream();
     </script>
 </body>
 </html>
