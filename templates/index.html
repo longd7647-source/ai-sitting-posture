@@ -171,25 +171,6 @@
             object-fit: contain;
         }
 
-        .video-overlay-badge {
-            position: absolute;
-            top: 15px;
-            left: 15px;
-            background: rgba(15, 23, 42, 0.75);
-            backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #38bdf8;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            pointer-events: none;
-            z-index: 5;
-        }
-
         .sidebar {
             display: flex;
             flex-direction: column;
@@ -336,8 +317,7 @@
                 </div>
             </div>
             <div class="video-wrapper">
-                <img id="videoFeed" src="/api/latest_frame" alt="Video stream từ ESP32-S3 CAM">
-                <div class="video-overlay-badge" id="fpsBadge"><i class="fa-solid fa-bolt"></i> Đang kết nối...</div>
+                <img src="/video_feed" alt="Video stream từ ESP32-S3 CAM" onerror="this.src=''">
             </div>
         </div>
 
@@ -391,6 +371,72 @@
                 <div class="alert-content">
                     <h4>CẢNH BÁO TƯ THẾ!</h4>
                     <p id="alertReason">Bạn đang ngồi sai tư thế. Hãy điều chỉnh lại dáng ngồi.</p>
+                </div>
+            </div>
+
+            <!-- Cài đặt tần suất & còi loa -->
+            <div class="stat-card" style="border: 1px solid var(--border); margin-top: 14px;">
+                <div class="stat-label">
+                    <span>CÀI ĐẶT CẢNH BÁO & TẦN SUẤT</span>
+                    <i class="fa-solid fa-sliders"></i>
+                </div>
+                
+                <div style="margin-top: 10px;">
+                    <label style="font-size: 12px; color: var(--text-sub); display: block; margin-bottom: 4px;">Thời gian sai liên tục để báo động:</label>
+                    <select id="webThresholdSelect" style="width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-main); font-size: 13px;">
+                        <option value="5">5 giây (Thử nghiệm nhanh)</option>
+                        <option value="15">15 giây</option>
+                        <option value="30">30 giây</option>
+                        <option value="60">1 phút</option>
+                        <option value="120">2 phút</option>
+                        <option value="180">3 phút</option>
+                        <option value="300" selected>5 phút (Khuyến nghị chuẩn)</option>
+                        <option value="600">10 phút</option>
+                    </select>
+                </div>
+
+                <div style="margin-top: 10px;">
+                    <label style="font-size: 12px; color: var(--text-sub); display: block; margin-bottom: 4px;">Chu kỳ nhắc lại sau đó:</label>
+                    <select id="webCooldownSelect" style="width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-main); font-size: 13px;">
+                        <option value="15">15 giây</option>
+                        <option value="30">30 giây</option>
+                        <option value="60" selected>1 phút (Khuyến nghị)</option>
+                        <option value="120">2 phút</option>
+                        <option value="300">5 phút</option>
+                    </select>
+                </div>
+
+                <div style="margin-top: 12px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 13px; color: var(--text-main); font-weight: 500;">Phát loa ESP32 trên bàn:</span>
+                    <input type="checkbox" id="webSpeakerToggle" checked style="width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer;">
+                </div>
+
+                <button onclick="saveWebSettings()" style="width: 100%; margin-top: 12px; padding: 10px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                    <i class="fa-solid fa-floppy-disk"></i> Lưu & Áp Dụng
+                </button>
+                <div id="saveMsg" style="font-size: 12px; color: var(--success); text-align: center; margin-top: 6px; display: none;">✅ Đã lưu cài đặt!</div>
+            </div>
+
+            <!-- Kiểm tra âm thanh cảnh báo JQ6500 (4 bài MP3) -->
+            <div class="stat-card" style="border: 1px solid var(--border); margin-top: 14px;">
+                <div class="stat-label">
+                    <span>ÂM THANH CẢNH BÁO (JQ6500)</span>
+                    <i class="fa-solid fa-volume-high"></i>
+                </div>
+                <p style="font-size: 12px; color: var(--text-sub); margin-top: 6px; margin-bottom: 10px;">Nghe thử 4 file âm thanh (001.mp3 - 004.mp3):</p>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <button onclick="playTrackSample(1)" style="padding: 9px; font-size: 12px; font-weight: 600; background: #059669; color: white; border: none; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
+                        <i class="fa-solid fa-play"></i> Track 1 (Cổ)
+                    </button>
+                    <button onclick="playTrackSample(2)" style="padding: 9px; font-size: 12px; font-weight: 600; background: #2563eb; color: white; border: none; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
+                        <i class="fa-solid fa-play"></i> Track 2 (Lưng)
+                    </button>
+                    <button onclick="playTrackSample(3)" style="padding: 9px; font-size: 12px; font-weight: 600; background: #d97706; color: white; border: none; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
+                        <i class="fa-solid fa-play"></i> Track 3 (Cả 2)
+                    </button>
+                    <button onclick="playTrackSample(4)" style="padding: 9px; font-size: 12px; font-weight: 600; background: #7c3aed; color: white; border: none; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
+                        <i class="fa-solid fa-play"></i> Track 4 (Ready)
+                    </button>
                 </div>
             </div>
         </div>
@@ -450,12 +496,22 @@
             });
         }
 
+        function playTrackSample(trackNum) {
+            const audioEl = document.getElementById("ttsAudio");
+            const fname = "00" + trackNum + ".mp3";
+            audioEl.src = `/audio/${fname}`;
+            audioEl.play().catch(e => {
+                console.warn("Lỗi phát audio:", e);
+            });
+        }
+
         async function fetchStatus() {
             try {
                 const response = await fetch('/api/status');
                 if (!response.ok) return;
                 const data = await response.json();
 
+                // Cập nhật trạng thái kết nối
                 const connEl = document.getElementById("connStatus");
                 if (data.is_connected) {
                     connEl.className = "badge badge-success";
@@ -465,10 +521,12 @@
                     connEl.innerText = "CHỜ TÍN HIỆU CAM...";
                 }
 
+                // Cập nhật góc Camera tự động
                 const camView = data.camera_view || "Đang phân tích...";
                 document.getElementById("cameraViewBadge").innerText = `📷 ${camView}`;
                 document.getElementById("cameraViewText").innerText = camView;
 
+                // Tùy chỉnh nhãn theo góc cam
                 if (camView.includes("Chính diện")) {
                     document.getElementById("neckLabel").innerText = "ĐỘ NGHIÊNG ĐẦU (Vẹo cổ: < 14°)";
                     document.getElementById("torsoLabel").innerText = "ĐỘ LỆCH HAI VAI (< 10°)";
@@ -477,6 +535,7 @@
                     document.getElementById("torsoLabel").innerText = "GÓC LƯNG / THÂN TRÊN";
                 }
 
+                // Cập nhật tình trạng tư thế
                 const statusTextEl = document.getElementById("postureStatusText");
                 const timeDetailEl = document.getElementById("postureTimeDetail");
                 statusTextEl.innerText = data.status;
@@ -492,6 +551,7 @@
                     timeDetailEl.innerText = "Đang tìm cơ thể...";
                 }
 
+                // Cập nhật thanh góc cổ
                 const neckVal = data.neck_angle || 0;
                 document.getElementById("neckValText").innerText = `${neckVal}°`;
                 const neckPercent = Math.min(100, (neckVal / 50) * 100);
@@ -499,6 +559,7 @@
                 neckBar.style.width = `${neckPercent}%`;
                 neckBar.style.backgroundColor = neckVal >= 32 ? "var(--danger)" : "var(--success)";
 
+                // Cập nhật thanh góc lưng
                 const torsoVal = data.torso_angle || 0;
                 document.getElementById("torsoValText").innerText = `${torsoVal}°`;
                 const torsoPercent = Math.min(100, (torsoVal / 30) * 100);
@@ -506,6 +567,7 @@
                 torsoBar.style.width = `${torsoPercent}%`;
                 torsoBar.style.backgroundColor = torsoVal >= 18 ? "var(--danger)" : "var(--success)";
 
+                // Xử lý cảnh báo âm thanh và hiển thị hộp cảnh báo
                 const alertBox = document.getElementById("alertBox");
                 const alertReason = document.getElementById("alertReason");
 
@@ -526,59 +588,54 @@
             }
         }
 
-        // Bộ nạp luồng video thích ứng mượt mà (HTTP/2 Double-Buffering)
-        let isStreamActive = true;
-        let isFetchingFrame = false;
-        let frameCount = 0;
-        let lastFpsTime = Date.now();
-
-        function initResilientStream() {
-            const videoEl = document.getElementById("videoFeed");
-            const fpsBadge = document.getElementById("fpsBadge");
-            if (!videoEl) return;
-
-            function fetchNextFrame() {
-                if (!isStreamActive || isFetchingFrame) return;
-                isFetchingFrame = true;
-
-                const nextImg = new Image();
-                const timestamp = Date.now();
-                nextImg.src = `/api/latest_frame?t=${timestamp}`;
-
-                nextImg.onload = function() {
-                    videoEl.src = nextImg.src;
-                    isFetchingFrame = false;
-
-                    frameCount++;
-                    const now = Date.now();
-                    if (now - lastFpsTime >= 1000) {
-                        const currentFps = Math.round((frameCount * 1000) / (now - lastFpsTime));
-                        frameCount = 0;
-                        lastFpsTime = now;
-                        if (fpsBadge) {
-                            fpsBadge.innerHTML = `<i class="fa-solid fa-bolt"></i> Live • ${currentFps} FPS`;
-                        }
+        async function loadWebSettings() {
+            try {
+                const res = await fetch('/api/settings');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.bad_posture_threshold_sec) {
+                        document.getElementById("webThresholdSelect").value = data.bad_posture_threshold_sec;
                     }
-
-                    // Tần số nạp frame tiếp theo: 80ms giúp bắt kịp mọi frame từ ESP32
-                    setTimeout(fetchNextFrame, 80);
-                };
-
-                nextImg.onerror = function() {
-                    isFetchingFrame = false;
-                    if (fpsBadge) {
-                        fpsBadge.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Chờ tín hiệu...`;
+                    if (data.alert_cooldown_sec) {
+                        document.getElementById("webCooldownSelect").value = data.alert_cooldown_sec;
                     }
-                    setTimeout(fetchNextFrame, 400);
-                };
+                    if (data.speaker_enabled !== undefined) {
+                        document.getElementById("webSpeakerToggle").checked = data.speaker_enabled;
+                    }
+                }
+            } catch(e) {
+                console.error("Lỗi nạp settings:", e);
             }
-
-            fetchNextFrame();
         }
 
+        async function saveWebSettings() {
+            const thresh = parseInt(document.getElementById("webThresholdSelect").value);
+            const cool = parseInt(document.getElementById("webCooldownSelect").value);
+            const spk = document.getElementById("webSpeakerToggle").checked;
+
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        bad_posture_threshold_sec: thresh,
+                        alert_cooldown_sec: cool,
+                        speaker_enabled: spk
+                    })
+                });
+                if (res.ok) {
+                    const msg = document.getElementById("saveMsg");
+                    msg.style.display = "block";
+                    setTimeout(() => { msg.style.display = "none"; }, 3000);
+                }
+            } catch(e) {
+                alert("Lỗi lưu cài đặt!");
+            }
+        }
+
+        loadWebSettings();
         setInterval(fetchStatus, 1000);
         fetchStatus();
-        initResilientStream();
     </script>
 </body>
 </html>

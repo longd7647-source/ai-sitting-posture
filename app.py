@@ -1,12 +1,13 @@
 import os
 import io
 import time
+import json
 import math as m
 import cv2
 import numpy as np
 import threading
 from datetime import datetime, timezone, timedelta
-from flask import Flask, Response, render_template, request, jsonify, send_file
+from flask import Flask, Response, render_template, request, jsonify, send_file, send_from_directory
 from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
 import requests
@@ -21,10 +22,9 @@ except ImportError:
 app = Flask(__name__)
 
 # Khởi tạo MediaPipe Pose
-# Bật static_image_mode=False để tận dụng Landmark Tracking qua từng frame,
-# giúp tốc độ nhận diện nhanh gấp 3-4 lần (~20ms thay vì ~250ms), video mượt mà hơn nhiều
+# Bật static_image_mode=True để phân tích chính xác từng frame rời từ ESP32 không bị trôi điểm
 pose = mp_pose.Pose(
-    static_image_mode=False,
+    static_image_mode=True,
     model_complexity=1,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
@@ -33,10 +33,44 @@ pose = mp_pose.Pose(
 # Khóa luồng (Thread Lock) để đồng bộ dữ liệu
 data_lock = threading.Lock()
 
-# Biến lưu trữ khung hình mới nhất để phát qua /video_feed và /api/latest_frame
+# ================= CẤU HÌNH HỆ THỐNG & TẦN SUẤT CẢNH BÁO =================
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "app_config.json")
+
+default_settings = {
+    "bad_posture_threshold_sec": 300,  # Mặc định 5 phút (300 giây) sai liên tục mới cảnh báo
+    "alert_cooldown_sec": 60,          # Nhắc lại sau mỗi 60 giây nếu chưa sửa tư thế
+    "speaker_enabled": True,           # Cho phép còi loa ESP32 kêu
+    "vibrate_enabled": True,           # Rung điện thoại
+    "voice_enabled": True,             # Giọng nói TTS
+    "notification_enabled": True       # Thông báo đẩy
+}
+
+def load_system_settings():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                cfg = dict(default_settings)
+                cfg.update(saved)
+                return cfg
+        except Exception as e:
+            print(f"[CONFIG] Lỗi đọc app_config.json: {e}")
+    return dict(default_settings)
+
+def save_system_settings(settings_dict):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings_dict, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[CONFIG] Lỗi ghi app_config.json: {e}")
+        return False
+
+system_settings = load_system_settings()
+
+# Biến lưu trữ khung hình mới nhất để phát qua /video_feed
 latest_processed_frame = None
 last_camera_packet_time = 0
-frame_counter = 0
 
 # Biến trạng thái phân tích tư thế thích ứng đa góc
 status_data = {
@@ -50,7 +84,6 @@ status_data = {
     "error_message": "",
     "alert": False,
     "last_update": 0,
-    "frame_id": 0,
     "is_connected": False
 }
 
@@ -63,12 +96,12 @@ last_alert_triggered_time = 0
 VN_TZ = timezone(timedelta(hours=7))
 
 # Tải font chữ hỗ trợ tiếng Việt mượt mà trên Render Linux
-cached_fonts = {}
+cached_font = None
 
 def get_vietnamese_font(font_size=24):
-    global cached_fonts
-    if font_size in cached_fonts:
-        return cached_fonts[font_size]
+    global cached_font
+    if cached_font is not None:
+        return cached_font
 
     font_candidates = [
         "arial.ttf",
@@ -81,9 +114,8 @@ def get_vietnamese_font(font_size=24):
     for fpath in font_candidates:
         if os.path.exists(fpath):
             try:
-                f = ImageFont.truetype(fpath, font_size)
-                cached_fonts[font_size] = f
-                return f
+                cached_font = ImageFont.truetype(fpath, font_size)
+                return cached_font
             except Exception:
                 pass
 
@@ -96,37 +128,26 @@ def get_vietnamese_font(font_size=24):
                 with open(local_font_path, "wb") as f:
                     f.write(r.content)
         if os.path.exists(local_font_path):
-            f = ImageFont.truetype(local_font_path, font_size)
-            cached_fonts[font_size] = f
-            return f
+            cached_font = ImageFont.truetype(local_font_path, font_size)
+            return cached_font
     except Exception as e:
         print(f"Không thể tải font ngoài: {e}")
 
-    f = ImageFont.load_default()
-    cached_fonts[font_size] = f
-    return f
-
-def draw_multiple_texts_vietnamese(image, text_items):
-    """
-    Vẽ nhiều đoạn chữ tiếng Việt có dấu lên ảnh trong 1 lần chuyển đổi RGB duy nhất (tối ưu hóa CPU & FPS)
-    text_items: list of (text, position, font_size, color)
-    """
-    try:
-        image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(image_pil)
-        for text, position, font_size, color in text_items:
-            font = get_vietnamese_font(font_size)
-            fill_color = (color[2], color[1], color[0]) if len(color) == 3 else color
-            draw.text(position, text, font=font, fill=fill_color)
-        return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    except Exception as e:
-        for text, position, font_size, color in text_items:
-            cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        return image
+    cached_font = ImageFont.load_default()
+    return cached_font
 
 def draw_text_vietnamese(image, text, position, font_size=24, color=(0, 255, 0)):
     """Vẽ chữ tiếng Việt có dấu lên ảnh OpenCV thông qua Pillow"""
-    return draw_multiple_texts_vietnamese(image, [(text, position, font_size, color)])
+    try:
+        font = get_vietnamese_font(font_size)
+        image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(image_pil)
+        fill_color = (color[2], color[1], color[0]) if len(color) == 3 else color
+        draw.text(position, text, font=font, fill=fill_color)
+        return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        return image
 
 def calculate_angle_vertical(p1, p2):
     """Tính góc nghiêng của đường thẳng p1->p2 so với phương thẳng đứng (độ)"""
@@ -200,7 +221,7 @@ def ping():
 @app.route('/api/upload', methods=['POST'])
 def upload_frame():
     """Nhận ảnh từ ESP32-S3 và tự động phân tích theo góc đặt camera tương ứng"""
-    global latest_processed_frame, last_camera_packet_time, frame_counter
+    global latest_processed_frame, last_camera_packet_time
     global good_start_time, bad_start_time, last_alert_triggered_time, status_data
 
     img_bytes = request.data
@@ -218,7 +239,6 @@ def upload_frame():
 
     now = time.time()
     last_camera_packet_time = now
-    frame_counter += 1
     h, w = image.shape[:2]
 
     # Xử lý qua MediaPipe Pose
@@ -235,6 +255,9 @@ def upload_frame():
     should_alert = False
     color = green
     camera_view_label = "Chưa xác định"
+    head_forward_offset = 0
+    hip_visible = False
+    view_type = "UNKNOWN"
 
     if results.pose_landmarks:
         lm = results.pose_landmarks.landmark
@@ -261,6 +284,7 @@ def upload_frame():
         # 2. Xử lý thuật toán thích ứng theo từng góc camera
         if view_type == "FRONT":
             camera_view_label = "Chính diện (Frontal)"
+            # Góc nghiêng đầu (Head Tilt) so với phương ngang
             ls_pt = keypoints.get('LEFT_SHOULDER', (0, 0))
             rs_pt = keypoints.get('RIGHT_SHOULDER', (0, 0))
             le_pt = keypoints.get('LEFT_EAR', (0, 0))
@@ -269,6 +293,7 @@ def upload_frame():
             neck_angle = calculate_angle_horizontal(le_pt, re_pt)      # Độ nghiêng đầu
             torso_angle = calculate_angle_horizontal(ls_pt, rs_pt)     # Độ lệch 2 vai
 
+            # Cúi sát màn hình: khoảng cách từ cằm/mũi tới vai bị thu hẹp
             nose_shoulder_dist = abs(nose_pt[1] - (ls_pt[1] + rs_pt[1]) / 2.0)
             slouch_forward = (nose_shoulder_dist < 45)
 
@@ -289,13 +314,16 @@ def upload_frame():
             neck_angle = calculate_angle_vertical(shoulder_pt, ear_pt)
 
             if hip_visible:
+                # Nếu thấy rõ hông -> đo góc vai-hông
                 torso_angle = calculate_angle_vertical(hip_pt, shoulder_pt)
                 is_bad = (neck_angle >= 32 or torso_angle >= 18)
                 if torso_angle >= 18:
                     error_msg += f"Lưng nghiêng ({torso_angle}°). "
             else:
+                # BỊ BÀN CHE HÔNG: Dùng tiêu chuẩn Forward Head Posture (FHP) & độ đổ thân trên
+                # Trục cổ bình thường: ear_x gần tương đương shoulder_x. Khi gù lưng, ear_x trượt ra trước
                 head_forward_offset = abs(ear_pt[0] - shoulder_pt[0])
-                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt)
+                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt) # Góc thân trên thay thế
                 is_bad = (neck_angle >= 32 or head_forward_offset > 55)
                 if head_forward_offset > 55:
                     error_msg += "Gù lưng/nhô đầu ra trước. "
@@ -336,9 +364,14 @@ def upload_frame():
             good_start_time = None
             posture_time = int(now - bad_start_time)
 
-            if posture_time >= 5:
-                should_alert = True
-                last_alert_triggered_time = now
+            thresh_sec = system_settings.get("bad_posture_threshold_sec", 300)
+            cooldown_sec = system_settings.get("alert_cooldown_sec", 60)
+
+            # Chỉ cảnh báo khi ngồi sai liên tục đủ thời gian ngưỡng (ví dụ: 5 phút = 300s)
+            if posture_time >= thresh_sec:
+                if (now - last_alert_triggered_time) >= cooldown_sec:
+                    should_alert = True
+                    last_alert_triggered_time = now
 
         # 4. Vẽ khung xương MediaPipe
         connections = [
@@ -369,29 +402,47 @@ def upload_frame():
         cv2.circle(image, ear_pt, 5, (255, 200, 0), -1)
         cv2.circle(image, shoulder_pt, 5, (0, 255, 255), -1)
 
-        # Chú thích lên ảnh bằng 1 lần vẽ gộp (Batch text rendering tiết kiệm CPU)
-        vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
-        text_items = [
-            (f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color),
-            (f"Góc cam: {camera_view_label}", (15, 55), 18, (255, 255, 255)),
-            (f"{posture_status}: {posture_time}s", (15, h - 35), 24, color),
-            (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
-        ]
-        image = draw_multiple_texts_vietnamese(image, text_items)
+        # Chú thích lên ảnh
+        image = draw_text_vietnamese(image, f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color)
+        image = draw_text_vietnamese(image, f"Góc cam: {camera_view_label}", (15, 55), 18, (255, 255, 255))
+        image = draw_text_vietnamese(image, f"{posture_status}: {posture_time}s", (15, h - 35), 24, color)
 
     else:
         posture_status = "Không phát hiện người"
+        image = draw_text_vietnamese(image, "Không thể nhận diện tư thế", (15, 30), 22, red)
         good_start_time = None
         bad_start_time = None
-        vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
-        text_items = [
-            ("Không thể nhận diện tư thế", (15, 30), 22, red),
-            (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
-        ]
-        image = draw_multiple_texts_vietnamese(image, text_items)
 
+    # Hiển thị giờ Việt Nam chuẩn (UTC+7)
+    vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
+    image = draw_text_vietnamese(image, f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
+
+    # Mã hóa JPEG đưa vào luồng phát Web
     ret, jpeg_buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     frame_bytes = jpeg_buffer.tobytes()
+
+    thresh_sec = system_settings.get("bad_posture_threshold_sec", 300)
+    cooldown_sec = system_settings.get("alert_cooldown_sec", 60)
+    speaker_enabled = system_settings.get("speaker_enabled", True)
+    speaker_should_alert = should_alert and speaker_enabled
+
+    # Phân loại âm thanh cảnh báo theo 4 file MP3 trong templates/
+    # Track 1 (001.mp3): Cúi gập cổ quá sâu
+    # Track 2 (002.mp3): Gù lưng / thân trên đổ gập ra trước
+    # Track 3 (003.mp3): Sai tư thế phối hợp (đồng thời cả cổ và lưng)
+    # Track 4 (004.mp3): Lệch vai / nghiêng vẹo cột sống hoặc cảnh báo khác
+    alert_track = 1
+    has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
+    has_bad_torso = (torso_angle >= 18) or (not hip_visible and head_forward_offset > 55)
+
+    if has_bad_neck and has_bad_torso:
+        alert_track = 3  # Phối hợp cả cổ và lưng
+    elif has_bad_torso:
+        alert_track = 2  # Gù lưng
+    elif has_bad_neck:
+        alert_track = 1  # Cúi cổ
+    else:
+        alert_track = 4  # Sai tư thế khác (lệch vai, nghiêng đầu...)
 
     with data_lock:
         latest_processed_frame = frame_bytes
@@ -405,76 +456,47 @@ def upload_frame():
             "bad_posture_time": posture_time if posture_status == "Sai tư thế" else 0,
             "error_message": error_msg.strip(),
             "alert": should_alert,
+            "speaker_alert": speaker_should_alert,
+            "track": alert_track,
+            "bad_posture_threshold_sec": thresh_sec,
+            "alert_cooldown_sec": cooldown_sec,
+            "speaker_enabled": speaker_enabled,
             "last_update": now,
-            "frame_id": frame_counter,
             "is_connected": True
         }
 
     return jsonify({
         "status": posture_status,
+        "error_msg": error_msg.strip(),
         "camera_view": camera_view_label,
         "neck_angle": neck_angle,
         "torso_angle": torso_angle,
-        "alert": should_alert,
+        "alert": speaker_should_alert,  # ESP32 chỉ phát loa khi còi bật
+        "track": alert_track,           # Số thứ tự bài âm thanh (1, 2, 3, 4)
+        "app_alert": should_alert,
         "posture_time": posture_time,
-        "frame_id": frame_counter
+        "bad_posture_threshold_sec": thresh_sec,
+        "alert_cooldown_sec": cooldown_sec
     }), 200
 
-@app.route('/api/latest_frame')
-def api_latest_frame():
-    """
-    Định dạng truyền frame độc lập mượt mà (HTTP/2 Binary Snapshot Stream):
-    Trả về ngay frame JPEG mới nhất mà không giữ luồng Gunicorn, không bị timeout 120s,
-    tương thích 100% với Cloudflare/Render/Chrome.
-    """
-    with data_lock:
-        now = time.time()
-        if latest_processed_frame is not None and (now - last_camera_packet_time <= 8):
-            frame = latest_processed_frame
-        else:
-            msg = "Đang chờ tín hiệu từ ESP32-S3 CAM..." if last_camera_packet_time == 0 else "Mất kết nối với ESP32-S3 CAM!"
-            frame = create_standby_frame(msg)
-
-    response = Response(frame, mimetype='image/jpeg')
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    response.headers['X-Frame-ID'] = str(frame_counter)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
-
 def generate_mjpeg_stream():
-    """Luồng phát MJPEG tối ưu chuẩn RFC có Content-Length và chống buffer"""
-    try:
-        while True:
-            with data_lock:
-                now = time.time()
-                if latest_processed_frame is not None and (now - last_camera_packet_time <= 8):
-                    frame_to_send = latest_processed_frame
-                else:
-                    msg = "Đang chờ tín hiệu từ ESP32-S3 CAM..." if last_camera_packet_time == 0 else "Mất kết nối với ESP32-S3 CAM!"
-                    frame_to_send = create_standby_frame(msg)
+    """Phát luồng MJPEG thời gian thực cho trình duyệt Web"""
+    while True:
+        with data_lock:
+            now = time.time()
+            if latest_processed_frame is not None and (now - last_camera_packet_time <= 8):
+                frame_to_send = latest_processed_frame
+            else:
+                msg = "Đang chờ tín hiệu từ ESP32-S3 CAM..." if last_camera_packet_time == 0 else "Mất kết nối với ESP32-S3 CAM!"
+                frame_to_send = create_standby_frame(msg)
 
-            length_header = f"Content-Length: {len(frame_to_send)}\r\n\r\n".encode()
-            chunk = (b'--frame\r\n'
-                     b'Content-Type: image/jpeg\r\n' +
-                     length_header +
-                     frame_to_send +
-                     b'\r\n')
-            yield chunk
-            time.sleep(0.06)
-    except (GeneratorExit, BrokenPipeError, ConnectionResetError):
-        # Giải phóng thread ngay khi client ngắt kết nối
-        pass
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_to_send + b'\r\n')
+        time.sleep(0.08)
 
 @app.route('/video_feed')
 def video_feed():
-    response = Response(generate_mjpeg_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    response.headers['X-Accel-Buffering'] = 'no'
-    return response
+    return Response(generate_mjpeg_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/api/status')
 def api_status():
@@ -499,6 +521,43 @@ def api_tts():
         return send_file(fp, mimetype="audio/mpeg")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    global system_settings
+    if request.method == 'POST':
+        try:
+            data = request.get_json(silent=True) or request.form.to_dict()
+            with data_lock:
+                if "bad_posture_threshold_sec" in data:
+                    system_settings["bad_posture_threshold_sec"] = int(data["bad_posture_threshold_sec"])
+                if "alert_cooldown_sec" in data:
+                    system_settings["alert_cooldown_sec"] = int(data["alert_cooldown_sec"])
+                if "speaker_enabled" in data:
+                    val = data["speaker_enabled"]
+                    system_settings["speaker_enabled"] = val in [True, "true", "True", 1, "1"]
+                if "vibrate_enabled" in data:
+                    val = data["vibrate_enabled"]
+                    system_settings["vibrate_enabled"] = val in [True, "true", "True", 1, "1"]
+                if "voice_enabled" in data:
+                    val = data["voice_enabled"]
+                    system_settings["voice_enabled"] = val in [True, "true", "True", 1, "1"]
+                if "notification_enabled" in data:
+                    val = data["notification_enabled"]
+                    system_settings["notification_enabled"] = val in [True, "true", "True", 1, "1"]
+                save_system_settings(system_settings)
+            return jsonify({"success": True, "settings": system_settings}), 200
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+    else:
+        with data_lock:
+            return jsonify(system_settings), 200
+
+@app.route('/audio/<filename>')
+def serve_template_audio(filename):
+    """Phục vụ trực tiếp các file âm thanh (001.mp3 - 004.mp3) từ thư mục templates/"""
+    templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+    return send_from_directory(templates_dir, filename)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
