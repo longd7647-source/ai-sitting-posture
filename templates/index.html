@@ -238,6 +238,206 @@
             transition: all 0.3s ease;
         }
 
+        /* ================= BẢNG ĐIỀU KHIỂN & TEST PAN-TILT SERVO ================= */
+        .ptz-panel {
+            padding: 18px 20px;
+            background: rgba(15, 23, 42, 0.7);
+            border-top: 1px solid var(--card-border);
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .ptz-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .ptz-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            color: #38bdf8;
+            text-transform: uppercase;
+        }
+
+        .ptz-grid-layout {
+            display: grid;
+            grid-template-columns: 210px 1fr 1fr;
+            gap: 14px;
+            align-items: stretch;
+        }
+
+        @media (max-width: 992px) {
+            .ptz-grid-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .ptz-col-card {
+            background: rgba(30, 41, 59, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .ptz-col-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            color: #94a3b8;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: 4px;
+        }
+
+        /* Cụm D-Pad 3x3 */
+        .dpad-container {
+            display: grid;
+            grid-template-columns: repeat(3, 54px);
+            grid-template-rows: repeat(3, 44px);
+            gap: 8px;
+            justify-content: center;
+            align-items: center;
+            margin: auto;
+        }
+
+        .ptz-btn {
+            background: #1e293b;
+            color: var(--text-main);
+            border: 1px solid #334155;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            user-select: none;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        }
+
+        .ptz-btn:hover {
+            background: #334155;
+            border-color: #475569;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .ptz-btn:active, .ptz-btn.active-key {
+            transform: translateY(1px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            filter: brightness(1.25);
+        }
+
+        .ptz-btn-up {
+            grid-column: 2;
+            grid-row: 1;
+            background: linear-gradient(135deg, #1e3a8a, #2563eb);
+            border-color: #3b82f6;
+            color: white;
+        }
+
+        .ptz-btn-left {
+            grid-column: 1;
+            grid-row: 2;
+            background: linear-gradient(135deg, #075985, #0284c7);
+            border-color: #38bdf8;
+            color: white;
+        }
+
+        .ptz-btn-stop {
+            grid-column: 2;
+            grid-row: 2;
+            background: linear-gradient(135deg, #991b1b, #dc2626);
+            border-color: #ef4444;
+            color: white;
+            font-size: 12px;
+        }
+
+        .ptz-btn-right {
+            grid-column: 3;
+            grid-row: 2;
+            background: linear-gradient(135deg, #075985, #0284c7);
+            border-color: #38bdf8;
+            color: white;
+        }
+
+        .ptz-btn-down {
+            grid-column: 2;
+            grid-row: 3;
+            background: linear-gradient(135deg, #1e3a8a, #2563eb);
+            border-color: #3b82f6;
+            color: white;
+        }
+
+        .ptz-slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            outline: none;
+            -webkit-appearance: none;
+            background: #334155;
+            cursor: pointer;
+            margin: 6px 0;
+        }
+
+        .ptz-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #38bdf8;
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.6);
+            cursor: pointer;
+        }
+
+        .ptz-mini-btn {
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 8px 6px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+
+        .ptz-mini-btn:hover {
+            background: #2563eb;
+            color: white;
+            border-color: #3b82f6;
+        }
+
+        .ptz-mini-btn:active {
+            transform: scale(0.96);
+        }
+
+        .ptz-subhint {
+            font-size: 10px;
+            color: var(--text-sub);
+            text-align: center;
+            margin-top: 6px;
+        }
+
         .alert-box.active {
             animation: alertShake 0.5s ease-in-out infinite alternate;
         }
@@ -318,6 +518,88 @@
             </div>
             <div class="video-wrapper">
                 <img src="/video_feed" alt="Video stream từ ESP32-S3 CAM" onerror="this.src=''">
+            </div>
+
+            <!-- BẢNG ĐIỀU KHIỂN & TEST CAMERA (PAN - TILT SERVO) -->
+            <div class="ptz-panel">
+                <div class="ptz-header">
+                    <div class="ptz-title">
+                        <i class="fa-solid fa-gamepad"></i>
+                        <span>Điều Khiển & Test Camera (Pan - Tilt SG90)</span>
+                    </div>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <span id="ptzTiltBadge" class="badge badge-info" style="font-size: 11px;">Tilt: 65°</span>
+                        <div id="ptzStatus" class="badge badge-success"><i class="fa-solid fa-circle-check"></i> Sẵn sàng</div>
+                    </div>
+                </div>
+
+                <div class="ptz-grid-layout">
+                    <!-- Cột 1: Cụm D-Pad 4 hướng & Phím tắt -->
+                    <div class="ptz-col-card">
+                        <div class="ptz-col-title"><i class="fa-solid fa-arrows-up-down-left-right"></i> D-PAD 4 HƯỚNG</div>
+                        <div class="dpad-container">
+                            <button id="btnPtzUp" class="ptz-btn ptz-btn-up" onclick="sendServoCmd('up')" title="Ngẩng lên (+5°)">
+                                <i class="fa-solid fa-chevron-up"></i>
+                                <span style="font-size: 9px; margin-top: 2px;">LÊN</span>
+                            </button>
+                            <button id="btnPtzLeft" class="ptz-btn ptz-btn-left" onclick="sendServoCmd('left')" title="Nhích Trái 200ms">
+                                <i class="fa-solid fa-chevron-left"></i>
+                                <span style="font-size: 9px; margin-top: 2px;">TRÁI</span>
+                            </button>
+                            <button id="btnPtzStop" class="ptz-btn ptz-btn-stop" onclick="sendServoCmd('stop')" title="Phanh dừng khẩn cấp (Space)">
+                                <i class="fa-solid fa-hand"></i>
+                                <span style="font-size: 9px; margin-top: 2px;">DỪNG</span>
+                            </button>
+                            <button id="btnPtzRight" class="ptz-btn ptz-btn-right" onclick="sendServoCmd('right')" title="Nhích Phải 200ms">
+                                <i class="fa-solid fa-chevron-right"></i>
+                                <span style="font-size: 9px; margin-top: 2px;">PHẢI</span>
+                            </button>
+                            <button id="btnPtzDown" class="ptz-btn ptz-btn-down" onclick="sendServoCmd('down')" title="Cúi xuống (-5°)">
+                                <i class="fa-solid fa-chevron-down"></i>
+                                <span style="font-size: 9px; margin-top: 2px;">XUỐNG</span>
+                            </button>
+                        </div>
+                        <div class="ptz-subhint">
+                            Phím tắt: <b>[↑] [↓] [←] [→]</b> hoặc <b>[Space]</b>
+                        </div>
+                    </div>
+
+                    <!-- Cột 2: Trục Dọc (Tilt 180° Positional) -->
+                    <div class="ptz-col-card">
+                        <div class="ptz-col-title"><i class="fa-solid fa-up-down"></i> TRỤC DỌC (TILT 180°)</div>
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                            <span style="color: var(--text-sub);">Góc gật dọc:</span>
+                            <span id="tiltValDisplay" style="font-weight: 700; color: #38bdf8;">65°</span>
+                        </div>
+                        <input type="range" min="35" max="145" value="65" class="ptz-slider" id="tiltSlider" oninput="onTiltSliderChange()">
+
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px;">
+                            <button class="ptz-mini-btn" onclick="setTiltPreset(65)">📐 Bàn Học 65°</button>
+                            <button class="ptz-mini-btn" onclick="setTiltPreset(90)">🎯 Ngang 90°</button>
+                            <button class="ptz-mini-btn" onclick="setTiltPreset(115)">🔭 Cao 115°</button>
+                        </div>
+                    </div>
+
+                    <!-- Cột 3: Trục Ngang (Pan 360° Continuous) & Test -->
+                    <div class="ptz-col-card">
+                        <div class="ptz-col-title"><i class="fa-solid fa-rotate"></i> TRỤC NGANG (PAN 360°) & TEST</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 6px;">
+                            <button class="ptz-mini-btn" style="background: #0369a1;" onclick="sendServoCmd('rotate_left')">⏪ Quay Trái</button>
+                            <button class="ptz-mini-btn" style="background: #dc2626;" onclick="sendServoCmd('stop')">⏹️ Dừng</button>
+                            <button class="ptz-mini-btn" style="background: #0369a1;" onclick="sendServoCmd('rotate_right')">Quay Phải ⏩</button>
+                        </div>
+
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px; color: var(--text-sub);">
+                            <span>Zero-Trim (chống trôi):</span>
+                            <span id="trimValDisplay" style="color: #f59e0b; font-weight: bold;">90</span>
+                        </div>
+                        <input type="range" min="85" max="95" value="90" class="ptz-slider" id="trimSlider" oninput="onTrimSliderChange()">
+
+                        <button class="ptz-mini-btn" style="width: 100%; margin-top: 6px; background: linear-gradient(135deg, #d97706, #b45309); color: white;" onclick="sendServoCmd('sweep')">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i> Chạy Quét Thử Nghiệm (Sweep)
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -632,6 +914,127 @@
                 alert("Lỗi lưu cài đặt!");
             }
         }
+
+        // ================= ĐIỀU KHIỂN & TEST PAN-TILT SERVO =================
+        let ptzStatusTimeout = null;
+
+        async function sendServoCmd(cmd, params = {}) {
+            const ptzStatus = document.getElementById("ptzStatus");
+            const labels = {
+                'up': 'LÊN (Tilt +5°)',
+                'down': 'XUỐNG (Tilt -5°)',
+                'left': 'TRÁI (Pan 200ms)',
+                'right': 'PHẢI (Pan 200ms)',
+                'stop': 'DỪNG XOAY',
+                'center': 'TRỰC DIỆN (90°)',
+                'preset_desk': 'BÀN HỌC (65°)',
+                'preset_high': 'GÓC CAO (115°)',
+                'rotate_left': 'QUAY TRÁI LIÊN TỤC',
+                'rotate_right': 'QUAY PHẢI LIÊN TỤC',
+                'sweep': 'QUÉT THỬ NGHIỆM',
+                'tilt': `GẬT TILT ${params.angle || ''}°`,
+                'trim': `ZERO-TRIM ${params.val || ''}`
+            };
+            const labelText = labels[cmd] || cmd.toUpperCase();
+
+            if (ptzStatus) {
+                ptzStatus.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${labelText}...`;
+                ptzStatus.className = "badge badge-warning";
+            }
+
+            try {
+                let url = '/api/servo?cmd=' + encodeURIComponent(cmd);
+                if (params.angle !== undefined) url += '&angle=' + encodeURIComponent(params.angle);
+                if (params.val !== undefined) url += '&val=' + encodeURIComponent(params.val);
+
+                const res = await fetch(url, { method: 'POST' });
+                if (res.ok) {
+                    if (ptzStatus) {
+                        ptzStatus.innerHTML = `<i class="fa-solid fa-check"></i> ${labelText}`;
+                        ptzStatus.className = "badge badge-success";
+                        clearTimeout(ptzStatusTimeout);
+                        ptzStatusTimeout = setTimeout(() => {
+                            ptzStatus.innerHTML = `<i class="fa-solid fa-circle-check"></i> Sẵn sàng`;
+                            ptzStatus.className = "badge badge-info";
+                        }, 2200);
+                    }
+                } else {
+                    throw new Error("Mã lỗi: " + res.status);
+                }
+            } catch (err) {
+                console.error("Lỗi điều khiển servo:", err);
+                if (ptzStatus) {
+                    ptzStatus.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Lỗi gửi lệnh`;
+                    ptzStatus.className = "badge badge-danger";
+                }
+            }
+        }
+
+        let tiltDebounce = null;
+        function onTiltSliderChange() {
+            const val = document.getElementById("tiltSlider").value;
+            document.getElementById("tiltValDisplay").innerText = val + "°";
+            const tiltBadge = document.getElementById("ptzTiltBadge");
+            if (tiltBadge) tiltBadge.innerText = `Tilt: ${val}°`;
+            if (tiltDebounce) clearTimeout(tiltDebounce);
+            tiltDebounce = setTimeout(() => {
+                sendServoCmd('tilt', { angle: val });
+            }, 60);
+        }
+
+        function setTiltPreset(angle) {
+            document.getElementById("tiltSlider").value = angle;
+            document.getElementById("tiltValDisplay").innerText = angle + "°";
+            const tiltBadge = document.getElementById("ptzTiltBadge");
+            if (tiltBadge) tiltBadge.innerText = `Tilt: ${angle}°`;
+            const presetMap = { 65: 'preset_desk', 90: 'center', 115: 'preset_high' };
+            sendServoCmd(presetMap[angle] || 'tilt', { angle: angle });
+        }
+
+        let trimDebounce = null;
+        function onTrimSliderChange() {
+            const val = document.getElementById("trimSlider").value;
+            document.getElementById("trimValDisplay").innerText = val;
+            if (trimDebounce) clearTimeout(trimDebounce);
+            trimDebounce = setTimeout(() => {
+                sendServoCmd('trim', { val: val });
+            }, 100);
+        }
+
+        function highlightPtzBtn(btnId) {
+            const btn = document.getElementById(btnId);
+            if (btn) {
+                btn.classList.add("active-key");
+                setTimeout(() => btn.classList.remove("active-key"), 180);
+            }
+        }
+
+        // Lắng nghe phím tắt điều hướng mũi tên và phím cách
+        window.addEventListener('keydown', (e) => {
+            if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                highlightPtzBtn('btnPtzUp');
+                sendServoCmd('up');
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                highlightPtzBtn('btnPtzDown');
+                sendServoCmd('down');
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                highlightPtzBtn('btnPtzLeft');
+                sendServoCmd('left');
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                highlightPtzBtn('btnPtzRight');
+                sendServoCmd('right');
+            } else if (e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                highlightPtzBtn('btnPtzStop');
+                sendServoCmd('stop');
+            }
+        });
 
         loadWebSettings();
         setInterval(fetchStatus, 1000);

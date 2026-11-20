@@ -92,6 +92,10 @@ good_start_time = None
 bad_start_time = None
 last_alert_triggered_time = 0
 
+# Hàng đợi lệnh điều khiển Pan-Tilt Servo gửi tới ESP32-S3 CAM
+pending_servo_cmd = None
+latest_servo_status = {"cmd": "stop", "time": 0}
+
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
 
@@ -426,6 +430,13 @@ def upload_frame():
     speaker_enabled = system_settings.get("speaker_enabled", True)
     speaker_should_alert = should_alert and speaker_enabled
 
+    # Lấy lệnh điều khiển Servo đang chờ để gửi kèm phản hồi về cho ESP32
+    servo_cmd_to_send = ""
+    with data_lock:
+        if pending_servo_cmd is not None:
+            servo_cmd_to_send = pending_servo_cmd
+            pending_servo_cmd = None
+
     # Phân loại âm thanh cảnh báo theo 4 file MP3 trong templates/
     # Track 1 (001.mp3): Cúi gập cổ quá sâu
     # Track 2 (002.mp3): Gù lưng / thân trên đổ gập ra trước
@@ -476,7 +487,8 @@ def upload_frame():
         "app_alert": should_alert,
         "posture_time": posture_time,
         "bad_posture_threshold_sec": thresh_sec,
-        "alert_cooldown_sec": cooldown_sec
+        "alert_cooldown_sec": cooldown_sec,
+        "servo_cmd": servo_cmd_to_send
     }), 200
 
 def generate_mjpeg_stream():
@@ -558,6 +570,74 @@ def serve_template_audio(filename):
     """Phục vụ trực tiếp các file âm thanh (001.mp3 - 004.mp3) từ thư mục templates/"""
     templates_dir = os.path.join(os.path.dirname(__file__), "templates")
     return send_from_directory(templates_dir, filename)
+
+@app.route('/api/servo', methods=['GET', 'POST'])
+def api_servo():
+    """Nhận lệnh điều khiển & hiệu chuẩn Pan-Tilt Servo từ Web UI và đẩy vào hàng đợi cho ESP32"""
+    global pending_servo_cmd, latest_servo_status
+    cmd = request.args.get('cmd')
+    if not cmd and request.is_json:
+        data = request.get_json(silent=True) or {}
+        cmd = data.get('cmd')
+    if not cmd and request.form:
+        cmd = request.form.get('cmd')
+
+    if not cmd:
+        return jsonify({"success": False, "error": "Thiếu tham số cmd"}), 400
+
+    cmd = str(cmd).strip().lower()
+
+    # Xử lý các lệnh đặc thù kèm tham số (Slider Tilt, Slider Trim)
+    if cmd == "tilt":
+        angle = request.args.get('angle')
+        if not angle and request.is_json:
+            angle = (request.get_json(silent=True) or {}).get('angle')
+        if not angle and request.form:
+            angle = request.form.get('angle')
+        if angle is not None:
+            try:
+                ang_int = max(35, min(145, int(angle)))
+                cmd = f"tilt:{ang_int}"
+            except Exception:
+                pass
+    elif cmd == "trim":
+        val = request.args.get('val')
+        if not val and request.is_json:
+            val = (request.get_json(silent=True) or {}).get('val')
+        if not val and request.form:
+            val = request.form.get('val')
+        if val is not None:
+            try:
+                val_int = max(80, min(100, int(val)))
+                cmd = f"trim:{val_int}"
+            except Exception:
+                pass
+
+    valid_prefixes = ('tilt:', 'trim:')
+    valid_exact = {
+        'up', 'down', 'left', 'right', 'stop', 'center', 'desk',
+        'preset_desk', 'preset_center', 'preset_high', 'high',
+        'jog_left', 'jog_right', 'rotate_left', 'rotate_right', 'sweep'
+    }
+
+    if cmd not in valid_exact and not any(cmd.startswith(p) for p in valid_prefixes):
+        return jsonify({"success": False, "error": f"Lệnh không hợp lệ: {cmd}"}), 400
+
+    with data_lock:
+        pending_servo_cmd = cmd
+        latest_servo_status = {"cmd": cmd, "time": time.time()}
+
+    return jsonify({"success": True, "cmd": cmd, "queued": True}), 200
+
+@app.route('/api/servo/status')
+def api_servo_status():
+    """Lấy trạng thái lệnh servo mới nhất"""
+    with data_lock:
+        return jsonify({
+            "latest_cmd": latest_servo_status["cmd"],
+            "last_time": latest_servo_status["time"],
+            "has_pending": pending_servo_cmd is not None
+        })
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

@@ -31,7 +31,7 @@ const char* SERVER_URL = "https://ai-sitting-posture-1.onrender.com/api/upload";
 
 // Chu kỳ nghỉ giữa 2 lần gửi (200ms giúp tốc độ đạt ~3 - 4 FPS mượt mà)
 const unsigned long UPLOAD_INTERVAL_MS = 200;
-const uint32_t      HTTP_TIMEOUT_MS    = 10000;  // timeout HTTP 10s
+const uint32_t      HTTP_TIMEOUT_MS    = 25000;  // timeout 25s (đủ thời gian cho Render wake-up và bắt tay SSL)
 const int           MAX_FAIL_BEFORE_RECONNECT = 5;
 const int           MAX_FAIL_BEFORE_RESTART   = 30;
 
@@ -89,6 +89,177 @@ void jq6500_init() {
   jqSetLoopMode(4);          // Đặt chế độ ONE_STOP: phát xong 1 file thì dừng ngay, không tự phát tiếp
   delay(100);
   Serial.println("[JQ6500] Khởi tạo mô-đun âm thanh thành công (GPIO41 TX, GPIO42 RX, ONE_STOP)!");
+}
+
+// ================= 3b. ĐỊNH NGHĨA CHÂN VÀ ĐIỀU KHIỂN PAN-TILT SERVO =================
+#define PIN_SERVO_PAN    21   // Trục Ngang (SG90 360° Continuous)  -> GPIO 21
+#define PIN_SERVO_TILT   47   // Trục Dọc   (SG90 180° Positional)  -> GPIO 47
+
+#include <esp_arduino_version.h>
+
+const int TILT_MIN      = 35;   // Giới hạn an toàn ngẩng lên
+const int TILT_MAX      = 145;  // Giới hạn an toàn cúi xuống
+const int TILT_CENTER   = 90;   // Vị trí nhìn trực diện 90°
+const int TILT_DESK     = 65;   // Vị trí nhìn nghiêng bàn học 65°
+int currentTilt         = TILT_DESK;
+
+int panTrimStopVal      = 90;   // Điểm dừng tĩnh trục 360° (Zero-Trim)
+int panSpeedDelta       = 20;   // Tốc độ nhấp nhả bước quay
+unsigned long jogEndTime = 0;
+bool isJogging          = false;
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  bool initServoHardware() {
+    bool ok1 = ledcAttach(PIN_SERVO_PAN, 50, 14);   // 50Hz, 14-bit resolution
+    bool ok2 = ledcAttach(PIN_SERVO_TILT, 50, 14);  // 50Hz, 14-bit resolution
+    Serial.printf("[SERVO INIT] Pan GPIO %d: %s | Tilt GPIO %d: %s\n",
+                  PIN_SERVO_PAN, ok1 ? "OK" : "LỖI",
+                  PIN_SERVO_TILT, ok2 ? "OK" : "LỖI");
+    return ok1 && ok2;
+  }
+  void writeServoPwm(uint8_t pin, int mappedVal) {
+    long us = map(mappedVal, 0, 180, 500, 2500);
+    uint32_t duty = (us * 16384) / 20000;
+    ledcWrite(pin, duty);
+  }
+#else
+  #define LEDC_CH_PAN   4
+  #define LEDC_CH_TILT  5
+  bool initServoHardware() {
+    ledcSetup(LEDC_CH_PAN, 50, 14);
+    ledcAttachPin(PIN_SERVO_PAN, LEDC_CH_PAN);
+    ledcSetup(LEDC_CH_TILT, 50, 14);
+    ledcAttachPin(PIN_SERVO_TILT, LEDC_CH_TILT);
+    Serial.printf("[SERVO INIT] Core 2.x Pan CH%d (GPIO %d) | Tilt CH%d (GPIO %d)\n",
+                  LEDC_CH_PAN, PIN_SERVO_PAN, LEDC_CH_TILT, PIN_SERVO_TILT);
+    return true;
+  }
+  void writeServoPwm(uint8_t pin, int mappedVal) {
+    long us = map(mappedVal, 0, 180, 500, 2500);
+    uint32_t duty = (us * 16384) / 20000;
+    if (pin == PIN_SERVO_PAN) ledcWrite(LEDC_CH_PAN, duty);
+    else ledcWrite(LEDC_CH_TILT, duty);
+  }
+#endif
+
+void panStop() {
+  isJogging = false;
+  writeServoPwm(PIN_SERVO_PAN, panTrimStopVal);
+  Serial.println("🛑 [PAN 360°] Dừng trục quay");
+}
+
+void panRotateLeft(int speedOffset = 0) {
+  isJogging = false;
+  int spd = (speedOffset > 0) ? speedOffset : panSpeedDelta;
+  int val = constrain(panTrimStopVal - spd, 0, 85);
+  writeServoPwm(PIN_SERVO_PAN, val);
+  Serial.printf("◀️ [PAN 360°] Quay TRÁI liên tục (PWM: %d)\n", val);
+}
+
+void panRotateRight(int speedOffset = 0) {
+  isJogging = false;
+  int spd = (speedOffset > 0) ? speedOffset : panSpeedDelta;
+  int val = constrain(panTrimStopVal + spd, 95, 180);
+  writeServoPwm(PIN_SERVO_PAN, val);
+  Serial.printf("▶️ [PAN 360°] Quay PHẢI liên tục (PWM: %d)\n", val);
+}
+
+void panJog(int direction, int durationMs = 200) {
+  int val = (direction < 0) ? constrain(panTrimStopVal - panSpeedDelta, 0, 85)
+                            : constrain(panTrimStopVal + panSpeedDelta, 95, 180);
+  writeServoPwm(PIN_SERVO_PAN, val);
+  jogEndTime = millis() + durationMs;
+  isJogging = true;
+  Serial.printf("⚡ [PAN 360° JOG] Nhích %s trong %d ms...\n", (direction < 0) ? "TRÁI" : "PHẢI", durationMs);
+}
+
+void updateServoLoop() {
+  if (isJogging && millis() >= jogEndTime) {
+    panStop();
+  }
+}
+
+void tiltSetAngle(int targetAngle) {
+  currentTilt = constrain(targetAngle, TILT_MIN, TILT_MAX);
+  writeServoPwm(PIN_SERVO_TILT, currentTilt);
+  Serial.printf("📐 [TILT 180°] Góc hiện tại: %d°\n", currentTilt);
+}
+
+void tiltSmoothMove(int targetAngle, int stepDelayMs = 12) {
+  targetAngle = constrain(targetAngle, TILT_MIN, TILT_MAX);
+  while (currentTilt != targetAngle) {
+    if (currentTilt < targetAngle) currentTilt++;
+    else currentTilt--;
+    writeServoPwm(PIN_SERVO_TILT, currentTilt);
+    delay(stepDelayMs);
+    updateServoLoop();
+  }
+}
+
+void runCoordinatedSweep() {
+  Serial.println(F("\n🔄 [DEMO SWEEP] Bắt đầu quét thử nghiệm 2 trục phối hợp..."));
+  tiltSmoothMove(55, 15);
+  delay(200);
+  tiltSmoothMove(125, 15);
+  delay(200);
+  tiltSmoothMove(TILT_CENTER, 15);
+  delay(300);
+  for (int i = 0; i < 3; i++) {
+    panJog(-1, 180);
+    delay(300);
+  }
+  delay(400);
+  for (int i = 0; i < 3; i++) {
+    panJog(1, 180);
+    delay(300);
+  }
+  panStop();
+  Serial.println(F("✅ [DEMO SWEEP] Hoàn tất! Về trạng thái cân bằng.\n"));
+}
+
+void handleServoCommand(const String& cmd) {
+  String c = cmd;
+  c.toLowerCase();
+  c.trim();
+
+  if (c == "left" || c == "jog_left") {
+    panJog(-1, 200);
+  } else if (c == "right" || c == "jog_right") {
+    panJog(1, 200);
+  } else if (c == "rotate_left") {
+    panRotateLeft();
+  } else if (c == "rotate_right") {
+    panRotateRight();
+  } else if (c == "up") {
+    tiltSetAngle(currentTilt + 5);
+  } else if (c == "down") {
+    tiltSetAngle(currentTilt - 5);
+  } else if (c == "stop") {
+    panStop();
+  } else if (c == "center" || c == "preset_center") {
+    panStop();
+    tiltSetAngle(TILT_CENTER);
+  } else if (c == "preset_desk" || c == "desk") {
+    panStop();
+    tiltSetAngle(TILT_DESK);
+  } else if (c == "preset_high" || c == "high") {
+    panStop();
+    tiltSetAngle(115);
+  } else if (c == "sweep") {
+    runCoordinatedSweep();
+  } else if (c.startsWith("tilt:")) {
+    int ang = c.substring(5).toInt();
+    tiltSetAngle(ang);
+  } else if (c.startsWith("trim:")) {
+    int t = c.substring(5).toInt();
+    if (t >= 80 && t <= 100) {
+      panTrimStopVal = t;
+      panStop();
+      Serial.printf("⚙️ [TRIM] Điểm dừng tĩnh mới: %d\n", panTrimStopVal);
+    }
+  } else {
+    Serial.printf("[SERVO] Lệnh không nhận diện: %s\n", c.c_str());
+  }
 }
 
 // ================= 4. ĐỊNH NGHĨA CHÂN CAMERA ESP32-S3 WROOM CAM =================
@@ -209,7 +380,8 @@ void connectWiFi() {
     
     // Cấu hình trước SSL Client
     client.setInsecure();
-    client.setTimeout(HTTP_TIMEOUT_MS / 1000);
+    client.setHandshakeTimeout(30);
+    client.setTimeout(HTTP_TIMEOUT_MS);
   } else {
     Serial.println("\n[WIFI] Kết nối thất bại! Sẽ tự thử lại trong loop().");
   }
@@ -217,13 +389,15 @@ void connectWiFi() {
 
 // ================= 6. TRÍCH XUẤT JSON ĐƠN GIẢN =================
 String extractJsonString(const String& json, const String& key) {
-  String searchKey = "\"" + key + "\":\"";
-  int startIdx = json.indexOf(searchKey);
-  if (startIdx == -1) return "";
-  startIdx += searchKey.length();
-  int endIdx = json.indexOf("\"", startIdx);
-  if (endIdx == -1) return "";
-  return json.substring(startIdx, endIdx);
+  int keyIdx = json.indexOf("\"" + key + "\"");
+  if (keyIdx == -1) return "";
+  int colonIdx = json.indexOf(':', keyIdx);
+  if (colonIdx == -1) return "";
+  int startQuote = json.indexOf('"', colonIdx);
+  if (startQuote == -1) return "";
+  int endQuote = json.indexOf('"', startQuote + 1);
+  if (endQuote == -1) return "";
+  return json.substring(startQuote + 1, endQuote);
 }
 
 int extractJsonInt(const String& json, const String& key) {
@@ -289,14 +463,15 @@ void sendFrameToCloud() {
     http.end();
     client.stop();
     client.setInsecure();
-    client.setTimeout(HTTP_TIMEOUT_MS / 1000);
+    client.setHandshakeTimeout(30);
+    client.setTimeout(HTTP_TIMEOUT_MS);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setReuse(true); // BẬT KEEP-ALIVE
 
     if (http.begin(client, SERVER_URL)) {
       isHttpInitialized = true;
     } else {
-      Serial.println("[HTTP] Không thể kết nối tới server Render!");
+      Serial.println("[HTTP] Không thể phân giải URL server Render!");
       esp_camera_fb_return(fb);
       return;
     }
@@ -329,9 +504,20 @@ void sendFrameToCloud() {
                   status.c_str(), neck, torso, posture_time, track, alert ? "TRUE" : "false");
 
     if (alert) onPostureAlert(track, neck, torso, status);
+
+    // Kiểm tra và thực thi lệnh điều khiển Pan-Tilt Servo từ Cloud
+    String servoCmd = extractJsonString(response, "servo_cmd");
+    if (servoCmd.length() > 0 && servoCmd != "null") {
+      Serial.printf(">> [SERVO CLOUD CMD] Thực thi lệnh: %s\n", servoCmd.c_str());
+      handleServoCommand(servoCmd);
+    }
   } else {
     Serial.printf("[POST LỖI] HTTP Code: %d (%s) - mất %lums\n",
                   httpCode, HTTPClient::errorToString(httpCode).c_str(), duration);
+    char errBuf[128];
+    if (client.lastError(errBuf, sizeof(errBuf)) < 0) {
+      Serial.printf("[SSL ERROR] %s\n", errBuf);
+    }
     // Nếu kết nối lỗi hoặc server đóng socket -> Đánh dấu để lần tới kết nối lại
     http.end();
     client.stop();
@@ -385,6 +571,12 @@ void setup() {
   // Khởi tạo mô-đun âm thanh JQ6500-16P (đặt âm lượng sẵn sàng)
   jq6500_init();
 
+  // Khởi tạo Pan-Tilt Servo (GPIO 21: Pan 360°, GPIO 47: Tilt 180°)
+  initServoHardware();
+  delay(100);
+  panStop();
+  tiltSetAngle(TILT_DESK);
+
   // Cấu hình WebServer cục bộ để test loa qua trình duyệt
   localServer.on("/", []() {
     String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -423,6 +615,16 @@ void setup() {
     localServer.send(200, "text/plain", "OK: Da dung phat");
   });
 
+  localServer.on("/servo", []() {
+    String cmd = "stop";
+    if (localServer.hasArg("cmd")) {
+      cmd = localServer.arg("cmd");
+    }
+    Serial.printf("[WEB TEST] Nhận lệnh Servo cục bộ: %s\n", cmd.c_str());
+    handleServoCommand(cmd);
+    localServer.send(200, "text/plain", "OK: " + cmd);
+  });
+
   localServer.begin();
   Serial.printf("[WEB TEST] Khởi động trang test loa tại: http://%s/\n", WiFi.localIP().toString().c_str());
 
@@ -436,10 +638,13 @@ void setup() {
 }
 
 void loop() {
-  // Lắng nghe yêu cầu từ trang Web Test loa
+  // Lắng nghe yêu cầu từ trang Web Test cục bộ
   localServer.handleClient();
 
-  // Lắng nghe phím bấm từ Serial Monitor để test loa
+  // Cập nhật ngắt nhịp quay servo Pan 360° tự động
+  updateServoLoop();
+
+  // Lắng nghe phím bấm từ Serial Monitor để test loa & servo
   if (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '1') {
@@ -455,11 +660,27 @@ void loop() {
       Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 4 (004.mp3) <<<");
       jqPlayTrack(4);
     } else if (c == 's' || c == 'S') {
-      Serial.println("\n>>> [SERIAL TEST] Dừng phát âm thanh <<<");
+      Serial.println("\n>>> [SERIAL TEST] Dừng phát âm thanh & Servo <<<");
       jqStop();
+      panStop();
     } else if (c == '+' || c == 'v' || c == 'V') {
       Serial.println("\n>>> [SERIAL TEST] Đặt âm lượng tối đa (30/30) <<<");
       jqSetVolume(30);
+    } else if (c == 'u' || c == 'U') {
+      Serial.println("\n>>> [SERIAL TEST] Servo Tilt LÊN (+5°) <<<");
+      handleServoCommand("up");
+    } else if (c == 'd' || c == 'D') {
+      Serial.println("\n>>> [SERIAL TEST] Servo Tilt XUỐNG (-5°) <<<");
+      handleServoCommand("down");
+    } else if (c == 'l' || c == 'L') {
+      Serial.println("\n>>> [SERIAL TEST] Servo Pan TRÁI (200ms) <<<");
+      handleServoCommand("left");
+    } else if (c == 'r' || c == 'R') {
+      Serial.println("\n>>> [SERIAL TEST] Servo Pan PHẢI (200ms) <<<");
+      handleServoCommand("right");
+    } else if (c == 'c' || c == 'C') {
+      Serial.println("\n>>> [SERIAL TEST] Servo Về TÂM (90°) <<<");
+      handleServoCommand("center");
     }
   }
 
