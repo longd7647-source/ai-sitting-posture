@@ -505,6 +505,14 @@ void sendFrameToCloud() {
 
     if (alert) onPostureAlert(track, neck, torso, status);
 
+    // Kiểm tra lệnh phát loa trực tiếp từ giao diện Web UI (nút bấm Track 1 - 4)
+    int playTrackCmd = extractJsonInt(response, "play_track");
+    if (playTrackCmd >= 1 && playTrackCmd <= 4) {
+      Serial.printf(">> [WEB TRIGGER LOA] Nhận lệnh từ giao diện Web -> Phát Track %d (00%d.mp3) <<<\n",
+                    playTrackCmd, playTrackCmd);
+      jqPlayTrack(playTrackCmd);
+    }
+
     // Kiểm tra và thực thi lệnh điều khiển Pan-Tilt Servo từ Cloud
     String servoCmd = extractJsonString(response, "servo_cmd");
     if (servoCmd.length() > 0 && servoCmd != "null") {

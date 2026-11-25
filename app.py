@@ -96,6 +96,9 @@ last_alert_triggered_time = 0
 pending_servo_cmd = None
 latest_servo_status = {"cmd": "stop", "time": 0}
 
+# Hàng đợi lệnh phát loa trực tiếp từ Web UI gửi tới ESP32-S3 CAM
+pending_track_cmd = 0
+
 # Múi giờ Việt Nam (UTC+7)
 VN_TZ = timezone(timedelta(hours=7))
 
@@ -227,7 +230,7 @@ def upload_frame():
     """Nhận ảnh từ ESP32-S3 và tự động phân tích theo góc đặt camera tương ứng"""
     global latest_processed_frame, last_camera_packet_time
     global good_start_time, bad_start_time, last_alert_triggered_time, status_data
-    global pending_servo_cmd
+    global pending_servo_cmd, pending_track_cmd
 
     img_bytes = request.data
     if not img_bytes and 'file' in request.files:
@@ -431,12 +434,16 @@ def upload_frame():
     speaker_enabled = system_settings.get("speaker_enabled", True)
     speaker_should_alert = should_alert and speaker_enabled
 
-    # Lấy lệnh điều khiển Servo đang chờ để gửi kèm phản hồi về cho ESP32
+    # Lấy lệnh điều khiển Servo & Lệnh phát loa đang chờ để gửi kèm phản hồi về cho ESP32
     servo_cmd_to_send = ""
+    track_to_play_now = 0
     with data_lock:
         if pending_servo_cmd is not None:
             servo_cmd_to_send = pending_servo_cmd
             pending_servo_cmd = None
+        if pending_track_cmd > 0:
+            track_to_play_now = pending_track_cmd
+            pending_track_cmd = 0
 
     # Phân loại âm thanh cảnh báo theo 4 file MP3 chuẩn mới trong templates/
     # Track 1 (001.mp3): Khởi động thành công (dành riêng cho khởi động mạch / hệ thống sẵn sàng)
@@ -485,6 +492,7 @@ def upload_frame():
         "torso_angle": torso_angle,
         "alert": speaker_should_alert,  # ESP32 chỉ phát loa khi còi bật
         "track": alert_track,           # Số thứ tự bài âm thanh (1, 2, 3, 4)
+        "play_track": track_to_play_now, # Lệnh phát loa trực tiếp từ Web UI (1-4, 0 nếu không có)
         "app_alert": should_alert,
         "posture_time": posture_time,
         "bad_posture_threshold_sec": thresh_sec,
@@ -639,6 +647,19 @@ def api_servo_status():
             "last_time": latest_servo_status["time"],
             "has_pending": pending_servo_cmd is not None
         })
+
+@app.route('/api/play_track', methods=['GET', 'POST'])
+def api_play_track():
+    """Nhận lệnh phát loa từ Web UI và đẩy vào hàng đợi gửi xuống ESP32-S3 qua /api/upload"""
+    global pending_track_cmd
+    track = request.args.get('track', type=int)
+    if not track and request.is_json:
+        track = (request.get_json(silent=True) or {}).get('track')
+    if track in [1, 2, 3, 4]:
+        with data_lock:
+            pending_track_cmd = track
+        return jsonify({"success": True, "track": track, "queued": True}), 200
+    return jsonify({"success": False, "error": "Track không hợp lệ (1-4)"}), 400
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

@@ -779,12 +779,23 @@
         }
 
         function playTrackSample(trackNum) {
+            // 1. Phát trên loa trình duyệt web
             const audioEl = document.getElementById("ttsAudio");
             const fname = "00" + trackNum + ".mp3";
             audioEl.src = `/audio/${fname}`;
             audioEl.play().catch(e => {
-                console.warn("Lỗi phát audio:", e);
+                console.warn("Lỗi phát audio web:", e);
             });
+
+            // 2. Gửi lệnh qua Cloud để LOA PHẦN CỨNG JQ6500 (nối ESP32 trên bàn) kêu ngay lập tức!
+            fetch(`/api/play_track?track=${trackNum}`)
+                .then(r => r.json())
+                .then(d => {
+                    console.log(`>> [LOA ESP32] Đã đẩy lệnh phát Track ${trackNum} xuống ESP32:`, d);
+                })
+                .catch(err => {
+                    console.warn("Lỗi gửi lệnh phát loa tới ESP32:", err);
+                });
         }
 
         async function fetchStatus() {
