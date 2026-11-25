@@ -227,6 +227,7 @@ def upload_frame():
     """Nhận ảnh từ ESP32-S3 và tự động phân tích theo góc đặt camera tương ứng"""
     global latest_processed_frame, last_camera_packet_time
     global good_start_time, bad_start_time, last_alert_triggered_time, status_data
+    global pending_servo_cmd
 
     img_bytes = request.data
     if not img_bytes and 'file' in request.files:

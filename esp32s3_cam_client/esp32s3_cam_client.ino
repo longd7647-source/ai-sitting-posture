@@ -23,8 +23,8 @@
 WebServer localServer(80);
 
 // ================= 1. CẤU HÌNH WIFI =================
-const char* WIFI_SSID = "Nha Dong Con";
-const char* WIFI_PASS = "28121994";
+const char* WIFI_SSID = "iQOO Z10 Turbo+";
+const char* WIFI_PASS = "12355678";
 
 // ================= 2. CẤU HÌNH SERVER CLOUD RENDER =================
 const char* SERVER_URL = "https://ai-sitting-posture-1.onrender.com/api/upload";
