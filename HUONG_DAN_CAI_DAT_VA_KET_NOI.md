@@ -49,10 +49,10 @@ Mô-đun JQ6500-16P **không sử dụng thẻ nhớ MicroSD** mà lưu trực t
 2. Máy tính sẽ nhận diện JQ6500 như một ổ đĩa CD ảo tên là `CD Drive`.
 3. Mở ổ đĩa đó, chạy file `MusicTool.exe` (hoặc phần mềm nạp âm thanh tích hợp).
 4. Chuẩn bị 4 file âm thanh định dạng `.mp3` (đã có sẵn trong thư mục `templates/` của dự án):
-   - `001.mp3`: *"Tư thế sai 1"* -> Cúi gập cổ quá sâu (Track 1)
-   - `002.mp3`: *"Tư thế sai 2"* -> Gù lưng / đổ thân người ra trước (Track 2)
-   - `003.mp3`: *"Tư thế sai 3"* -> Sai tư thế phối hợp cổ và lưng (Track 3)
-   - `004.mp3`: *"Tư thế 4 / Sẵn sàng"* -> Âm báo khởi động / cảnh báo vẹo lệch vai (Track 4)
+   - `001.mp3`: *"Khởi động thành công"* -> Âm báo hệ thống khởi động & kết nối Wi-Fi sẵn sàng (Track 1)
+   - `002.mp3`: *"Cảnh báo cổ"* -> Cúi gập cổ quá sâu / Forward Head Posture (Track 2)
+   - `003.mp3`: *"Cảnh báo lưng"* -> Gù lưng / đổ thân người ra trước (Track 3)
+   - `004.mp3`: *"Cảnh báo phối hợp"* -> Sai tư thế phối hợp cổ và lưng / lệch vai (Track 4)
 5. Nhấn nút thêm file MP3 theo đúng thứ tự 1 (`001.mp3`), 2 (`002.mp3`), 3 (`003.mp3`), 4 (`004.mp3`) rồi bấm nút nạp (Copy to Flash).
 6. Khi hoàn tất, rút cáp Micro-USB ra và cắm lại JQ6500 vào mạch với ESP32-S3.
 

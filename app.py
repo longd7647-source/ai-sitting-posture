@@ -438,21 +438,21 @@ def upload_frame():
             servo_cmd_to_send = pending_servo_cmd
             pending_servo_cmd = None
 
-    # Phân loại âm thanh cảnh báo theo 4 file MP3 trong templates/
-    # Track 1 (001.mp3): Cúi gập cổ quá sâu
-    # Track 2 (002.mp3): Gù lưng / thân trên đổ gập ra trước
-    # Track 3 (003.mp3): Sai tư thế phối hợp (đồng thời cả cổ và lưng)
-    # Track 4 (004.mp3): Lệch vai / nghiêng vẹo cột sống hoặc cảnh báo khác
-    alert_track = 1
+    # Phân loại âm thanh cảnh báo theo 4 file MP3 chuẩn mới trong templates/
+    # Track 1 (001.mp3): Khởi động thành công (dành riêng cho khởi động mạch / hệ thống sẵn sàng)
+    # Track 2 (002.mp3): Cúi gập cổ quá sâu (Forward Head Posture)
+    # Track 3 (003.mp3): Gù lưng / thân trên đổ gập ra trước (Slouching)
+    # Track 4 (004.mp3): Sai tư thế phối hợp (cả cổ và lưng) hoặc lệch vai / vẹo người
+    alert_track = 2  # Mặc định cảnh báo tư thế bắt đầu từ Track 2
     has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
     has_bad_torso = (torso_angle >= 18) or (not hip_visible and head_forward_offset > 55)
 
     if has_bad_neck and has_bad_torso:
-        alert_track = 3  # Phối hợp cả cổ và lưng
+        alert_track = 4  # Sai phối hợp cả cổ và lưng
     elif has_bad_torso:
-        alert_track = 2  # Gù lưng
+        alert_track = 3  # Gù lưng
     elif has_bad_neck:
-        alert_track = 1  # Cúi cổ
+        alert_track = 2  # Cúi cổ
     else:
         alert_track = 4  # Sai tư thế khác (lệch vai, nghiêng đầu...)
 

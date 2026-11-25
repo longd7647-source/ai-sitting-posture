@@ -418,11 +418,11 @@ void onPostureAlert(int track, int neck, int torso, const String& status) {
   }
   lastAudioAlertTime = now;
 
-  // Đảm bảo track hợp lệ từ 1 đến 4
-  if (track < 1 || track > 4) {
-    if (neck >= 32 && torso >= 18) track = 3;
-    else if (torso >= 18) track = 2;
-    else track = 1;
+  // Đảm bảo track cảnh báo tư thế hợp lệ từ 2 đến 4 (Track 1 dành riêng cho Khởi động)
+  if (track < 2 || track > 4) {
+    if (neck >= 32 && torso >= 18) track = 4; // Cả cổ và lưng
+    else if (torso >= 18) track = 3;          // Gù lưng
+    else track = 2;                           // Cúi cổ
   }
 
   Serial.printf(">>> [CẢNH BÁO LOA JQ6500] Phát Track %d (00%d.mp3) | Cổ: %d°, Lưng: %d° (%s) <<<\n",
@@ -630,7 +630,7 @@ void setup() {
 
   // TỰ ĐỘNG PHÁT THỬ NGAY KHI KHỞI ĐỘNG ĐỂ BÁO HIỆU PHẦN CỨNG SẴN SÀNG
   Serial.println("\n========================================================");
-  Serial.println(">>> [AUTO TEST] Đang tự động phát thử Track 1 (001.mp3) <<<");
+  Serial.println(">>> [AUTO BOOT] Đang tự động phát Track 1: Khởi động thành công (001.mp3) <<<");
   Serial.println(">>> Phần cứng: ESP32 GPIO 41 (TX) -> [1kΩ] -> JQ6500 RX <<<");
   Serial.println("========================================================\n");
   delay(1000);
@@ -648,16 +648,16 @@ void loop() {
   if (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '1') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 1 (001.mp3) <<<");
+      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 1: Khởi động (001.mp3) <<<");
       jqPlayTrack(1);
     } else if (c == '2') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 2 (002.mp3) <<<");
+      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 2: Cúi cổ (002.mp3) <<<");
       jqPlayTrack(2);
     } else if (c == '3') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 3 (003.mp3) <<<");
+      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 3: Gù lưng (003.mp3) <<<");
       jqPlayTrack(3);
     } else if (c == '4') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 4 (004.mp3) <<<");
+      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 4: Sai phối hợp (004.mp3) <<<");
       jqPlayTrack(4);
     } else if (c == 's' || c == 'S') {
       Serial.println("\n>>> [SERIAL TEST] Dừng phát âm thanh & Servo <<<");
