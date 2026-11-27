@@ -79,6 +79,8 @@ system_settings = load_system_settings()
 
 # Biến lưu trữ khung hình mới nhất để phát qua /video_feed
 latest_processed_frame = None
+latest_raw_frame_bytes = None
+new_raw_frame_event = threading.Event()
 last_camera_packet_time = 0
 
 # Biến trạng thái phân tích tư thế thích ứng đa góc
@@ -479,7 +481,7 @@ def process_single_frame(image):
 
     # NẾU CẦN CẢNH BÁO: BẮN LỆNH QUA ESP32 TRONG THREAD RIÊNG KHÔNG CHẶN VIDEO
     if speaker_should_alert and not IS_RENDER_ENV:
-        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        esp_ip = system_settings.get("esp32_ip", "10.247.173.81")
         def _trigger_speaker(ip, trk):
             try: requests.get(f"http://{ip}/play?track={trk}", timeout=1.0)
             except Exception: pass
@@ -582,11 +584,12 @@ def auto_discover_esp32_ip():
     return found_ip
 
 def esp32_stream_worker():
-    """Luồng nền độc lập liên tục kéo luồng MJPEG 30 FPS từ ESP32-S3 cổng 81"""
+    """Luồng nền độc lập liên tục kéo luồng MJPEG từ ESP32-S3 cổng 81 với tốc độ cao nhất (Zero-Latency)"""
+    global latest_raw_frame_bytes
     if IS_RENDER_ENV:
         return  # Trên Render không kéo trực tiếp mà nhận sync từ Local
 
-    print("[STREAM WORKER] Bắt đầu luồng kéo video MJPEG từ ESP32-S3 cổng 81...")
+    print("[STREAM WORKER] Bắt đầu luồng kéo video MJPEG từ ESP32-S3 cổng 81 (Zero-Latency)...")
     consecutive_errs = 0
 
     while True:
@@ -604,7 +607,8 @@ def esp32_stream_worker():
                         break
                     bytes_data += chunk
 
-                    # Vòng lặp bóc tách toàn bộ khung hình JPEG có trong buffer (tránh tràn/kẹt buffer)
+                    # Bóc tách khung hình JPEG, CHỈ GIỮ LẠI KHUNG MỚI NHẤT, BỎ KHUNG CŨ ĐỂ TRIỆT TIÊU ĐỘ TRỄ
+                    last_valid_jpg = None
                     while True:
                         a = bytes_data.find(b'\xff\xd8') # JPEG SOI
                         if a == -1:
@@ -617,12 +621,12 @@ def esp32_stream_worker():
                         if b == -1:
                             break
 
-                        jpg = bytes_data[:b+2]
+                        last_valid_jpg = bytes_data[:b+2]
                         bytes_data = bytes_data[b+2:]
-                        arr = np.frombuffer(jpg, dtype=np.uint8)
-                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if img is not None:
-                            process_single_frame(img)
+
+                    if last_valid_jpg is not None:
+                        latest_raw_frame_bytes = last_valid_jpg
+                        new_raw_frame_event.set()
             else:
                 consecutive_errs += 1
         except Exception as e:
@@ -640,8 +644,34 @@ def esp32_stream_worker():
                 pass
         time.sleep(1.0)
 
+def ai_processor_worker():
+    """Luồng xử lý AI riêng biệt: Luôn lấy khung hình MỚI NHẤT từ luồng nhận, triệt tiêu 100% trễ tích lũy"""
+    global latest_raw_frame_bytes
+    if IS_RENDER_ENV:
+        return
+
+    print("[AI WORKER] Khởi động luồng xử lý AI độc lập (Zero-Queue)...")
+    while True:
+        new_raw_frame_event.wait(timeout=0.05)
+        new_raw_frame_event.clear()
+
+        raw_bytes = latest_raw_frame_bytes
+        if raw_bytes is None:
+            continue
+
+        try:
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                process_single_frame(img)
+        except Exception as e:
+            pass
+
 stream_thread = threading.Thread(target=esp32_stream_worker, daemon=True)
 stream_thread.start()
+
+ai_thread = threading.Thread(target=ai_processor_worker, daemon=True)
+ai_thread.start()
 
 def generate_mjpeg_stream():
     """Phát luồng MJPEG thời gian thực cho trình duyệt Web"""
@@ -805,7 +835,7 @@ def api_servo():
 
     # Bắn trực tiếp sang ESP32 cổng 80: http://{esp_ip}/servo?cmd={cmd}
     if not IS_RENDER_ENV:
-        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        esp_ip = system_settings.get("esp32_ip", "10.247.173.81")
         def _forward_servo(ip, c):
             try: requests.get(f"http://{ip}/servo?cmd={c}", timeout=1.0)
             except Exception: pass
@@ -834,7 +864,7 @@ def api_play_track():
         with data_lock:
             pending_track_cmd = track
         if not IS_RENDER_ENV:
-            esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+            esp_ip = system_settings.get("esp32_ip", "10.247.173.81")
             def _forward_track(ip, t):
                 try: requests.get(f"http://{ip}/play?track={t}", timeout=1.0)
                 except Exception: pass
@@ -852,7 +882,7 @@ def api_esp32_ip():
         system_settings["esp32_ip"] = ip.strip()
         save_system_settings(system_settings)
         return jsonify({"success": True, "esp32_ip": system_settings["esp32_ip"]})
-    return jsonify({"esp32_ip": system_settings.get("esp32_ip", "192.168.1.69")})
+    return jsonify({"esp32_ip": system_settings.get("esp32_ip", "10.247.173.81")})
 
 @app.route('/api/rotate', methods=['GET', 'POST'])
 def api_rotate():
@@ -881,7 +911,7 @@ def api_camera_view_mode():
 CLOUD_SYNC_ENDPOINT = os.environ.get("CLOUD_SYNC_URL", "https://ai-sitting-posture-1.onrender.com/api/sync")
 
 def background_cloud_sync():
-    """Chạy ngầm trên máy tính Local: Cứ mỗi 1 giây đẩy 1 frame và dữ liệu lên Cloud Render"""
+    """Chạy ngầm trên máy tính Local: Đẩy dữ liệu và ảnh nén lên Cloud Render định kỳ ~0.3s (3 FPS) giảm trễ tối đa"""
     import base64
     if IS_RENDER_ENV:
         return  # Đang chạy trên Render thì không tự sync lên chính nó
@@ -890,10 +920,10 @@ def background_cloud_sync():
     last_sync_time = 0
 
     while True:
-        time.sleep(0.5)
+        time.sleep(0.1)
         now = time.time()
-        # Đồng bộ định kỳ mỗi 1.0 giây khi có dữ liệu camera
-        if now - last_sync_time < 1.0:
+        # Đồng bộ nhanh mỗi 0.35 giây (~3 FPS) khi có dữ liệu camera
+        if now - last_sync_time < 0.35:
             continue
 
         payload = None
@@ -909,7 +939,7 @@ def background_cloud_sync():
 
         if payload:
             try:
-                r = requests.post(CLOUD_SYNC_ENDPOINT, json=payload, timeout=3.5)
+                r = requests.post(CLOUD_SYNC_ENDPOINT, json=payload, timeout=1.8)
                 if r.status_code == 200:
                     last_sync_time = now
             except Exception:
