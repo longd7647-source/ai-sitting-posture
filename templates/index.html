@@ -608,11 +608,18 @@
             <!-- Vị trí Camera tự động nhận diện -->
             <div class="stat-card">
                 <div class="stat-label">
-                    <span>GÓC QUAY CAMERA (AUTO-DETECT)</span>
+                    <span>GÓC QUAY CAMERA</span>
                     <i class="fa-solid fa-camera-rotate"></i>
                 </div>
                 <div id="cameraViewText" class="stat-value" style="font-size: 19px; color: var(--primary);">Đang phân tích...</div>
-                <div style="font-size: 12px; color: var(--text-sub); margin-top: 4px;">Tự thích ứng theo vị trí đặt camera</div>
+                <div style="margin-top: 8px;">
+                    <select id="cameraViewModeSelect" onchange="changeCameraViewMode(this.value)" style="width: 100%; background: #0f172a; color: #cbd5e1; border: 1px solid #334155; border-radius: 6px; padding: 5px 8px; font-size: 12px; cursor: pointer; outline: none;">
+                        <option value="auto">🤖 Tự động nhận diện (Auto)</option>
+                        <option value="side">📐 Khóa góc: Ngang Hông 90°</option>
+                        <option value="diagonal">📐 Khóa góc: Chéo Bàn 3/4</option>
+                        <option value="front">📐 Khóa góc: Chính Diện</option>
+                    </select>
+                </div>
             </div>
 
             <!-- Trạng thái tư thế -->
@@ -1046,6 +1053,24 @@
                 sendServoCmd('stop');
             }
         });
+
+        function changeCameraViewMode(mode) {
+            fetch(`/api/camera_view_mode?mode=${mode}`)
+                .then(r => r.json())
+                .then(d => {
+                    console.log("Cập nhật chế độ góc cam:", d);
+                });
+        }
+
+        fetch('/api/camera_view_mode')
+            .then(r => r.json())
+            .then(d => {
+                if (d && d.camera_view_mode) {
+                    const sel = document.getElementById('cameraViewModeSelect');
+                    if (sel) sel.value = d.camera_view_mode;
+                }
+            })
+            .catch(() => {});
 
         loadWebSettings();
         setInterval(fetchStatus, 1000);

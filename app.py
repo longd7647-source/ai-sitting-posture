@@ -44,6 +44,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "app_config.json")
 
 default_settings = {
     "esp32_ip": "10.247.173.81",       # Địa chỉ IP của ESP32-S3 Cam (tự động cập nhật)
+    "camera_view_mode": "auto",        # Chế độ góc quay: auto (tự động), side (ngang hông), diagonal (chéo), front (chính diện)
     "rotate_180": True,                # Xoay ngược 180 độ theo hướng đặt camera
     "bad_posture_threshold_sec": 300,  # Mặc định 5 phút (300 giây) sai liên tục mới cảnh báo
     "alert_cooldown_sec": 60,          # Nhắc lại sau mỗi 60 giây nếu chưa sửa tư thế
@@ -205,27 +206,55 @@ def detect_camera_view(lm, w, h):
     - DIAGONAL_LEFT / DIAGONAL_RIGHT: Chéo góc bàn 3/4
     - SIDE_LEFT / SIDE_RIGHT: Ngang hông 90 độ
     """
+    forced_view = system_settings.get("camera_view_mode", "auto")
+
     ls = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
     rs = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
     le = lm[mp_pose.PoseLandmark.LEFT_EAR.value]
     re = lm[mp_pose.PoseLandmark.RIGHT_EAR.value]
     nose = lm[mp_pose.PoseLandmark.NOSE.value]
 
-    shoulder_dx = abs(ls.x - rs.x) * w
-    head_height = max(abs(nose.y - (ls.y + rs.y) / 2.0) * h, 20.0)
-    shoulder_ratio = shoulder_dx / head_height
-
-    # Xác định bên nào nhìn rõ hơn
+    # Xác định bên nào hướng về phía camera rõ hơn
     left_score = (ls.visibility + le.visibility) / 2.0
     right_score = (rs.visibility + re.visibility) / 2.0
     use_left = left_score >= right_score
 
-    if shoulder_ratio > 0.85:
-        return "FRONT", use_left
-    elif shoulder_ratio >= 0.32:
-        return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
-    else:
+    # Nếu người dùng đã khóa góc quay thủ công
+    if forced_view == "side":
         return ("SIDE_LEFT" if use_left else "SIDE_RIGHT"), use_left
+    elif forced_view == "diagonal":
+        return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
+    elif forced_view == "front":
+        return "FRONT", use_left
+
+    # TỰ ĐỘNG PHÂN BIỆT GÓC CHÍNH XÁC:
+    # 1. Kiểm tra vị trí mũi so với 2 vai:
+    # Khi nhìn nghiêng hoặc ngang hông, mặt quay về màn hình nên mũi chìa hẳn ra ngoài 2 vai:
+    min_sh_x = min(ls.x, rs.x)
+    max_sh_x = max(ls.x, rs.x)
+    nose_outside = (nose.x < min_sh_x - 0.02) or (nose.x > max_sh_x + 0.02)
+
+    # 2. Khoảng cách ngang giữa tai rõ hơn và mũi (Profile depth)
+    visible_ear = le if use_left else re
+    ear_nose_dx = abs(visible_ear.x - nose.x)
+
+    # 3. Chênh lệch độ hiển thị giữa 2 tai
+    ear_vis_diff = abs(le.visibility - re.visibility)
+    shoulder_dx = abs(ls.x - rs.x)
+
+    # Nếu mũi nằm ngoài khoảng 2 vai HOẶC nhìn nghiêng rõ rệt (khoảng cách tai-mũi lớn, 1 tai bị che):
+    if nose_outside or ear_nose_dx > 0.09 or ear_vis_diff > 0.25:
+        # Nhận diện Ngang hông 90° vs Chéo 3/4
+        if ear_nose_dx > 0.11 or shoulder_dx < 0.22 or ear_vis_diff > 0.35:
+            return ("SIDE_LEFT" if use_left else "SIDE_RIGHT"), use_left
+        else:
+            return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
+
+    # Nếu mũi nằm giữa 2 vai, 2 tai đều nhìn thấy và vai dang rộng:
+    if not nose_outside and shoulder_dx > 0.25 and ear_vis_diff < 0.30:
+        return "FRONT", use_left
+
+    return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
 
 def create_standby_frame(message="Đang chờ tín hiệu từ ESP32-S3 CAM..."):
     """Tạo khung hình nền đen chờ kết nối khi camera chưa bật"""
@@ -835,6 +864,18 @@ def api_rotate():
         system_settings["rotate_180"] = not system_settings.get("rotate_180", True)
     save_system_settings(system_settings)
     return jsonify({"success": True, "rotate_180": system_settings["rotate_180"]})
+
+@app.route('/api/camera_view_mode', methods=['GET', 'POST'])
+def api_camera_view_mode():
+    """Xem hoặc cài đặt chế độ góc quay camera: auto, side, diagonal, front"""
+    mode = request.args.get('mode')
+    if not mode and request.is_json:
+        mode = (request.get_json(silent=True) or {}).get('mode')
+    if mode in ['auto', 'side', 'diagonal', 'front']:
+        system_settings["camera_view_mode"] = mode
+        save_system_settings(system_settings)
+        return jsonify({"success": True, "camera_view_mode": mode})
+    return jsonify({"camera_view_mode": system_settings.get("camera_view_mode", "auto")})
 
 # ================= ĐỒNG BỘ LOCAL -> CLOUD RENDER (EDGE - CLOUD HYBRID) =================
 CLOUD_SYNC_ENDPOINT = os.environ.get("CLOUD_SYNC_URL", "https://ai-sitting-posture-1.onrender.com/api/sync")
