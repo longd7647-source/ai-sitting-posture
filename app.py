@@ -44,6 +44,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "app_config.json")
 
 default_settings = {
     "esp32_ip": "10.247.173.81",       # Địa chỉ IP của ESP32-S3 Cam (tự động cập nhật)
+    "rotate_180": True,                # Xoay ngược 180 độ theo hướng đặt camera
     "bad_posture_threshold_sec": 300,  # Mặc định 5 phút (300 giây) sai liên tục mới cảnh báo
     "alert_cooldown_sec": 60,          # Nhắc lại sau mỗi 60 giây nếu chưa sửa tư thế
     "speaker_enabled": True,           # Cho phép còi loa ESP32 kêu
@@ -250,6 +251,10 @@ def process_single_frame(image):
     """Phân tích 1 khung hình qua MediaPipe Pose và vẽ kết quả lên ảnh"""
     global latest_processed_frame, last_camera_packet_time
     global good_start_time, bad_start_time, last_alert_triggered_time, status_data
+
+    # Xoay ngược 180 độ nếu camera lắp ngược
+    if system_settings.get("rotate_180", True):
+        image = cv2.rotate(image, cv2.ROTATE_180)
 
     now = time.time()
     last_camera_packet_time = now
@@ -808,6 +813,17 @@ def api_esp32_ip():
         save_system_settings(system_settings)
         return jsonify({"success": True, "esp32_ip": system_settings["esp32_ip"]})
     return jsonify({"esp32_ip": system_settings.get("esp32_ip", "192.168.1.69")})
+
+@app.route('/api/rotate', methods=['GET', 'POST'])
+def api_rotate():
+    """Bật/tắt xoay khung hình camera 180 độ"""
+    req_val = request.args.get('enabled')
+    if req_val is not None:
+        system_settings["rotate_180"] = (req_val.lower() in ['true', '1', 'yes'])
+    else:
+        system_settings["rotate_180"] = not system_settings.get("rotate_180", True)
+    save_system_settings(system_settings)
+    return jsonify({"success": True, "rotate_180": system_settings["rotate_180"]})
 
 # ================= ĐỒNG BỘ LOCAL -> CLOUD RENDER (EDGE - CLOUD HYBRID) =================
 CLOUD_SYNC_ENDPOINT = os.environ.get("CLOUD_SYNC_URL", "https://ai-sitting-posture-1.onrender.com/api/sync")
