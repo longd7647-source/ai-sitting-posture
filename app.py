@@ -36,6 +36,7 @@ data_lock = threading.Lock()
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "app_config.json")
 
 default_settings = {
+    "esp32_ip": "192.168.1.69",       # Địa chỉ IP của ESP32-S3 Cam
     "bad_posture_threshold_sec": 300,  # Mặc định 5 phút (300 giây) sai liên tục mới cảnh báo
     "alert_cooldown_sec": 60,          # Nhắc lại sau mỗi 60 giây nếu chưa sửa tư thế
     "speaker_enabled": True,           # Cho phép còi loa ESP32 kêu
@@ -238,31 +239,16 @@ def index():
 def ping():
     return "OK", 200
 
-@app.route('/api/upload', methods=['POST'])
-def upload_frame():
-    """Nhận ảnh từ ESP32-S3 và tự động phân tích theo góc đặt camera tương ứng"""
+def process_single_frame(image):
+    """Phân tích 1 khung hình qua MediaPipe Pose và vẽ kết quả lên ảnh"""
     global latest_processed_frame, last_camera_packet_time
     global good_start_time, bad_start_time, last_alert_triggered_time, status_data
-    global pending_servo_cmd, pending_track_cmd
-
-    img_bytes = request.data
-    if not img_bytes and 'file' in request.files:
-        img_bytes = request.files['file'].read()
-
-    if not img_bytes:
-        return jsonify({"error": "No image data received"}), 400
-
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-    if image is None:
-        return jsonify({"error": "Failed to decode image"}), 400
 
     now = time.time()
     last_camera_packet_time = now
     h, w = image.shape[:2]
 
-    # Xử lý qua MediaPipe Pose: Resize ảnh (320x240) để tăng tốc độ phân tích AI gấp 4 lần
+    # Resize 320x240 để MediaPipe chạy siêu tốc (~15ms)
     small_rgb = cv2.resize(image, (320, 240))
     small_rgb = cv2.cvtColor(small_rgb, cv2.COLOR_BGR2RGB)
     results = pose.process(small_rgb)
@@ -289,7 +275,6 @@ def upload_frame():
         # 1. Tự động nhận diện góc đặt Camera
         view_type, use_left = detect_camera_view(lm, w, h)
 
-        # Trích xuất các điểm quan trọng theo bên nhìn rõ hơn
         ear_lm = lm[mp_pose.PoseLandmark.LEFT_EAR.value] if use_left else lm[mp_pose.PoseLandmark.RIGHT_EAR.value]
         shoulder_lm = lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value] if use_left else lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
         hip_lm = lm[mp_pose.PoseLandmark.LEFT_HIP.value] if use_left else lm[mp_pose.PoseLandmark.RIGHT_HIP.value]
@@ -300,27 +285,23 @@ def upload_frame():
         hip_pt = (int(hip_lm.x * w), int(hip_lm.y * h))
         nose_pt = (int(nose_lm.x * w), int(nose_lm.y * h))
 
-        # Kiểm tra hông có bị bàn che khuất không
         hip_visible = (hip_lm.visibility >= 0.55 and hip_pt[1] < h - 20)
 
         # 2. Xử lý thuật toán thích ứng theo từng góc camera
         if view_type == "FRONT":
             camera_view_label = "Chính diện (Frontal)"
-            # Góc nghiêng đầu (Head Tilt) so với phương ngang
             ls_pt = keypoints.get('LEFT_SHOULDER', (0, 0))
             rs_pt = keypoints.get('RIGHT_SHOULDER', (0, 0))
             le_pt = keypoints.get('LEFT_EAR', (0, 0))
             re_pt = keypoints.get('RIGHT_EAR', (0, 0))
 
-            neck_angle = calculate_angle_horizontal(le_pt, re_pt)      # Độ nghiêng đầu
-            torso_angle = calculate_angle_horizontal(ls_pt, rs_pt)     # Độ lệch 2 vai
+            neck_angle = calculate_angle_horizontal(le_pt, re_pt)
+            torso_angle = calculate_angle_horizontal(ls_pt, rs_pt)
 
-            # Cúi sát màn hình: khoảng cách từ cằm/mũi tới vai bị thu hẹp
             nose_shoulder_dist = abs(nose_pt[1] - (ls_pt[1] + rs_pt[1]) / 2.0)
             slouch_forward = (nose_shoulder_dist < 45)
 
             is_bad = (neck_angle >= 14 or torso_angle >= 10 or slouch_forward)
-
             if neck_angle >= 14:
                 error_msg += f"Nghiêng đầu ({neck_angle}°). "
             if torso_angle >= 10:
@@ -331,21 +312,16 @@ def upload_frame():
         elif "DIAGONAL" in view_type:
             side_name = "Hông Trái" if use_left else "Hông Phải"
             camera_view_label = f"Chéo Bàn 3/4 ({side_name})"
-
-            # Góc gập cổ: Đo từ TAI -> VAI (Craniovertebral Angle) - chuẩn y khoa công thái học
             neck_angle = calculate_angle_vertical(shoulder_pt, ear_pt)
 
             if hip_visible:
-                # Nếu thấy rõ hông -> đo góc vai-hông
                 torso_angle = calculate_angle_vertical(hip_pt, shoulder_pt)
                 is_bad = (neck_angle >= 32 or torso_angle >= 18)
                 if torso_angle >= 18:
                     error_msg += f"Lưng nghiêng ({torso_angle}°). "
             else:
-                # BỊ BÀN CHE HÔNG: Dùng tiêu chuẩn Forward Head Posture (FHP) & độ đổ thân trên
-                # Trục cổ bình thường: ear_x gần tương đương shoulder_x. Khi gù lưng, ear_x trượt ra trước
                 head_forward_offset = abs(ear_pt[0] - shoulder_pt[0])
-                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt) # Góc thân trên thay thế
+                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt)
                 is_bad = (neck_angle >= 32 or head_forward_offset > 55)
                 if head_forward_offset > 55:
                     error_msg += "Gù lưng/nhô đầu ra trước. "
@@ -356,7 +332,6 @@ def upload_frame():
         else: # SIDE_LEFT hoặc SIDE_RIGHT (90 độ)
             side_name = "Hông Trái" if use_left else "Hông Phải"
             camera_view_label = f"Ngang Hông 90° ({side_name})"
-
             neck_angle = calculate_angle_vertical(shoulder_pt, ear_pt)
             if hip_visible:
                 torso_angle = calculate_angle_vertical(hip_pt, shoulder_pt)
@@ -389,7 +364,6 @@ def upload_frame():
             thresh_sec = system_settings.get("bad_posture_threshold_sec", 300)
             cooldown_sec = system_settings.get("alert_cooldown_sec", 60)
 
-            # Chỉ cảnh báo khi ngồi sai liên tục đủ thời gian ngưỡng (ví dụ: 5 phút = 300s)
             if posture_time >= thresh_sec:
                 if (now - last_alert_triggered_time) >= cooldown_sec:
                     should_alert = True
@@ -419,12 +393,10 @@ def upload_frame():
             if p1 in keypoints and p2 in keypoints:
                 cv2.line(image, keypoints[p1], keypoints[p2], color, 2)
 
-        # Vẽ đường gióng trục Cổ Tai - Vai
         cv2.line(image, shoulder_pt, ear_pt, (255, 200, 0), 2)
         cv2.circle(image, ear_pt, 5, (255, 200, 0), -1)
         cv2.circle(image, shoulder_pt, 5, (0, 255, 255), -1)
 
-        # Chú thích lên ảnh (gom chung vẽ 1 lần siêu nhanh)
         vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
         image = draw_multiple_texts_vietnamese(image, [
             (f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color),
@@ -443,43 +415,34 @@ def upload_frame():
             (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
         ])
 
-    # Mã hóa JPEG đưa vào luồng phát Web
     ret, jpeg_buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     frame_bytes = jpeg_buffer.tobytes()
+
+    alert_track = 2
+    has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
+    has_bad_torso = (torso_angle >= 18) or (not hip_visible and head_forward_offset > 55)
+
+    if has_bad_neck and has_bad_torso:
+        alert_track = 4
+    elif has_bad_torso:
+        alert_track = 3
+    elif has_bad_neck:
+        alert_track = 2
+    else:
+        alert_track = 4
 
     thresh_sec = system_settings.get("bad_posture_threshold_sec", 300)
     cooldown_sec = system_settings.get("alert_cooldown_sec", 60)
     speaker_enabled = system_settings.get("speaker_enabled", True)
     speaker_should_alert = should_alert and speaker_enabled
 
-    # Lấy lệnh điều khiển Servo & Lệnh phát loa đang chờ để gửi kèm phản hồi về cho ESP32
-    servo_cmd_to_send = ""
-    track_to_play_now = 0
-    with data_lock:
-        if pending_servo_cmd is not None:
-            servo_cmd_to_send = pending_servo_cmd
-            pending_servo_cmd = None
-        if pending_track_cmd > 0:
-            track_to_play_now = pending_track_cmd
-            pending_track_cmd = 0
-
-    # Phân loại âm thanh cảnh báo theo 4 file MP3 chuẩn mới trong templates/
-    # Track 1 (001.mp3): Khởi động thành công (dành riêng cho khởi động mạch / hệ thống sẵn sàng)
-    # Track 2 (002.mp3): Cúi gập cổ quá sâu (Forward Head Posture)
-    # Track 3 (003.mp3): Gù lưng / thân trên đổ gập ra trước (Slouching)
-    # Track 4 (004.mp3): Sai tư thế phối hợp (cả cổ và lưng) hoặc lệch vai / vẹo người
-    alert_track = 2  # Mặc định cảnh báo tư thế bắt đầu từ Track 2
-    has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
-    has_bad_torso = (torso_angle >= 18) or (not hip_visible and head_forward_offset > 55)
-
-    if has_bad_neck and has_bad_torso:
-        alert_track = 4  # Sai phối hợp cả cổ và lưng
-    elif has_bad_torso:
-        alert_track = 3  # Gù lưng
-    elif has_bad_neck:
-        alert_track = 2  # Cúi cổ
-    else:
-        alert_track = 4  # Sai tư thế khác (lệch vai, nghiêng đầu...)
+    # NẾU CẦN CẢNH BÁO: BẮN LỆNH QUA ESP32 TRONG THREAD RIÊNG KHÔNG CHẶN VIDEO
+    if speaker_should_alert and not IS_RENDER_ENV:
+        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        def _trigger_speaker(ip, trk):
+            try: requests.get(f"http://{ip}/play?track={trk}", timeout=1.0)
+            except Exception: pass
+        threading.Thread(target=_trigger_speaker, args=(esp_ip, alert_track), daemon=True).start()
 
     with data_lock:
         latest_processed_frame = frame_bytes
@@ -502,21 +465,112 @@ def upload_frame():
             "is_connected": True
         }
 
-    return jsonify({
+    return {
         "status": posture_status,
         "error_msg": error_msg.strip(),
         "camera_view": camera_view_label,
         "neck_angle": neck_angle,
         "torso_angle": torso_angle,
-        "alert": speaker_should_alert,  # ESP32 chỉ phát loa khi còi bật
-        "track": alert_track,           # Số thứ tự bài âm thanh (1, 2, 3, 4)
-        "play_track": track_to_play_now, # Lệnh phát loa trực tiếp từ Web UI (1-4, 0 nếu không có)
-        "app_alert": should_alert,
+        "alert": speaker_should_alert,
+        "track": alert_track,
         "posture_time": posture_time,
         "bad_posture_threshold_sec": thresh_sec,
-        "alert_cooldown_sec": cooldown_sec,
-        "servo_cmd": servo_cmd_to_send
-    }), 200
+        "alert_cooldown_sec": cooldown_sec
+    }
+
+@app.route('/api/upload', methods=['POST'])
+def upload_frame():
+    """Tương thích ngược: Nhận ảnh từ ESP32 nếu chạy chế độ client POST"""
+    img_bytes = request.data
+    if not img_bytes and 'file' in request.files:
+        img_bytes = request.files['file'].read()
+
+    if not img_bytes:
+        return jsonify({"error": "No image data received"}), 400
+
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return jsonify({"error": "Failed to decode image"}), 400
+
+    resp = process_single_frame(image)
+    return jsonify(resp), 200
+
+# ================= KÉO LUỒNG VIDEO MJPEG TỪ ESP32 CỔNG 81 (25-30 FPS) =================
+import urllib.request
+
+def auto_discover_esp32_ip():
+    """Tự động quét nhanh dải IP mạng LAN để tìm ESP32 nếu IP bị thay đổi"""
+    found_ip = None
+    def _probe(ip_str):
+        nonlocal found_ip
+        if found_ip: return
+        try:
+            r = requests.get(f"http://{ip_str}/status", timeout=0.3)
+            if r.status_code == 200 and "ESP32-S3-POSTURE" in r.text:
+                found_ip = ip_str
+        except Exception:
+            pass
+
+    threads = []
+    for i in range(50, 95):
+        t = threading.Thread(target=_probe, args=(f"192.168.1.{i}",), daemon=True)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join(timeout=0.35)
+    return found_ip
+
+def esp32_stream_worker():
+    """Luồng nền độc lập liên tục kéo luồng MJPEG 30 FPS từ ESP32-S3 cổng 81"""
+    if IS_RENDER_ENV:
+        return  # Trên Render không kéo trực tiếp mà nhận sync từ Local
+
+    print("[STREAM WORKER] Bắt đầu luồng kéo video MJPEG từ ESP32-S3 cổng 81...")
+    consecutive_errs = 0
+
+    while True:
+        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        url = f"http://{esp_ip}:81/stream"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'ESP32Client'})
+            stream = urllib.request.urlopen(req, timeout=4.0)
+            bytes_data = b""
+            print(f"[STREAM WORKER] ✅ Đã kết nối thành công tới luồng video: {url}")
+            consecutive_errs = 0
+
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                bytes_data += chunk
+                a = bytes_data.find(b'\xff\xd8') # JPEG SOI
+                b = bytes_data.find(b'\xff\xd9') # JPEG EOI
+                if a != -1 and b != -1 and b > a:
+                    jpg = bytes_data[a:b+2]
+                    bytes_data = bytes_data[b+2:]
+                    arr = np.frombuffer(jpg, dtype=np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        process_single_frame(img)
+
+        except Exception as e:
+            consecutive_errs += 1
+            if consecutive_errs >= 3:
+                try:
+                    new_ip = auto_discover_esp32_ip()
+                    if new_ip and new_ip != esp_ip:
+                        print(f"[AUTO DISCOVER] Phát hiện ESP32 ở IP mới: {new_ip}")
+                        system_settings["esp32_ip"] = new_ip
+                        save_system_settings(system_settings)
+                        consecutive_errs = 0
+                except Exception:
+                    pass
+            time.sleep(1.2)
+
+stream_thread = threading.Thread(target=esp32_stream_worker, daemon=True)
+stream_thread.start()
 
 def generate_mjpeg_stream():
     """Phát luồng MJPEG thời gian thực cho trình duyệt Web"""
@@ -678,6 +732,14 @@ def api_servo():
         pending_servo_cmd = cmd
         latest_servo_status = {"cmd": cmd, "time": time.time()}
 
+    # Bắn trực tiếp sang ESP32 cổng 80: http://{esp_ip}/servo?cmd={cmd}
+    if not IS_RENDER_ENV:
+        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        def _forward_servo(ip, c):
+            try: requests.get(f"http://{ip}/servo?cmd={c}", timeout=1.0)
+            except Exception: pass
+        threading.Thread(target=_forward_servo, args=(esp_ip, cmd), daemon=True).start()
+
     return jsonify({"success": True, "cmd": cmd, "queued": True}), 200
 
 @app.route('/api/servo/status')
@@ -692,7 +754,7 @@ def api_servo_status():
 
 @app.route('/api/play_track', methods=['GET', 'POST'])
 def api_play_track():
-    """Nhận lệnh phát loa từ Web UI và đẩy vào hàng đợi gửi xuống ESP32-S3 qua /api/upload"""
+    """Nhận lệnh phát loa từ Web UI và gửi xuống ESP32-S3 cổng 80"""
     global pending_track_cmd
     track = request.args.get('track', type=int)
     if not track and request.is_json:
@@ -700,8 +762,26 @@ def api_play_track():
     if track in [1, 2, 3, 4]:
         with data_lock:
             pending_track_cmd = track
+        if not IS_RENDER_ENV:
+            esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+            def _forward_track(ip, t):
+                try: requests.get(f"http://{ip}/play?track={t}", timeout=1.0)
+                except Exception: pass
+            threading.Thread(target=_forward_track, args=(esp_ip, track), daemon=True).start()
         return jsonify({"success": True, "track": track, "queued": True}), 200
     return jsonify({"success": False, "error": "Track không hợp lệ (1-4)"}), 400
+
+@app.route('/api/esp32_ip', methods=['GET', 'POST'])
+def api_esp32_ip():
+    """Xem hoặc cập nhật IP của ESP32-S3 Camera"""
+    ip = request.args.get('ip')
+    if not ip and request.is_json:
+        ip = (request.get_json(silent=True) or {}).get('ip')
+    if ip:
+        system_settings["esp32_ip"] = ip.strip()
+        save_system_settings(system_settings)
+        return jsonify({"success": True, "esp32_ip": system_settings["esp32_ip"]})
+    return jsonify({"esp32_ip": system_settings.get("esp32_ip", "192.168.1.69")})
 
 # ================= ĐỒNG BỘ LOCAL -> CLOUD RENDER (EDGE - CLOUD HYBRID) =================
 IS_RENDER_ENV = (

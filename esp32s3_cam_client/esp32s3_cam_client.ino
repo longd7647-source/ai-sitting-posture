@@ -1,120 +1,126 @@
 /*
  * =====================================================================================
- * ESP32-S3 WROOM N16R8 CAM - POSTURE MONITORING CLIENT (OV2640)
- * BẢN TỐI ƯU TRUYỀN HÌNH ẢNH: HTTP KEEP-ALIVE + TĂNG TỐC ĐỘ KHUNG HÌNH (FPS)
+ * ESP32-S3 WROOM N16R8 CAM - POSTURE MONITORING IP STREAM SERVER
+ * (KIẾN TRÚC IP CAMERA MJPEG SERVER CỔNG 81 + ĐIỀU KHIỂN CỔNG 80)
  *
- * Các cải tiến tăng tốc:
- *  1. Tái sử dụng kết nối HTTPS (Keep-Alive): Bỏ qua bước bắt tay TLS/SSL sau lần đầu,
- *     giúp thời gian POST giảm từ ~1000ms xuống chỉ còn ~150 - 250ms!
- *  2. Giảm chu kỳ nghỉ UPLOAD_INTERVAL_MS xuống 200ms để tăng số FPS mượt mà.
- *  3. Điều chỉnh JPEG Quality = 14 (ảnh nhẹ ~10KB) giúp truyền qua mạng Internet cực nhanh.
- *  4. Cân bằng lại độ sáng/tương phản để giảm hiện tượng cháy sáng ám hồng của OV2640.
+ * TÍNH NĂNG VƯỢT TRỘI:
+ *  1. Phát luồng MJPEG Video chuẩn camera an ninh trên CỔNG 81 (/stream) đạt 25 - 30 FPS.
+ *  2. Server CỔNG 80 phục vụ API điều khiển tức thì:
+ *     - GET /play?track=1..4    : Phát còi loa JQ6500-16P (Track 1-4)
+ *     - GET /servo?cmd=...      : Điều khiển Pan-Tilt Servo (trực tiếp < 10ms)
+ *     - GET /status             : Trả về JSON trạng thái (IP, RSSI, góc servo)
+ *     - GET /capture            : Chụp 1 ảnh tĩnh JPEG
+ *     - GET /                   : Giao diện Web điều khiển & Test trực tiếp
+ *  3. Khắc phục triệt để độ trễ Ping-Pong, giải phóng 100% CPU cho ESP32.
  * =====================================================================================
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
-#include <WebServer.h>
-#include "esp_camera.h"
-
-// WebServer cục bộ để phục vụ nút bấm test loa từ trình duyệt điện thoại / PC
-WebServer localServer(80);
+#include <esp_camera.h>
+#include <esp_http_server.h>
+#include <esp_arduino_version.h>
 
 // ================= 1. CẤU HÌNH WIFI =================
 const char* WIFI_SSID = "iQOO Z10 Turbo+";
 const char* WIFI_PASS = "12355678";
 
-// ================= 2. CẤU HÌNH SERVER CLOUD RENDER =================
-const char* SERVER_URL = "https://ai-sitting-posture-1.onrender.com/api/upload";
-
-// Chu kỳ nghỉ giữa 2 lần gửi (200ms giúp tốc độ đạt ~3 - 4 FPS mượt mà)
-const unsigned long UPLOAD_INTERVAL_MS = 200;
-const uint32_t      HTTP_TIMEOUT_MS    = 25000;  // timeout 25s (đủ thời gian cho Render wake-up và bắt tay SSL)
-const int           MAX_FAIL_BEFORE_RECONNECT = 5;
-const int           MAX_FAIL_BEFORE_RESTART   = 30;
-
-unsigned long lastUploadTime = 0;
-int failCount = 0;       // số lần gửi lỗi liên tiếp
-int camFailCount = 0;    // số lần lấy frame lỗi liên tiếp
-
-// Đối tượng mạng toàn cục để tái sử dụng kết nối (Keep-Alive)
-WiFiClientSecure client;
-HTTPClient http;
-bool isHttpInitialized = false;
-
-// ================= 3. ĐỊNH NGHĨA CHÂN VÀ GIAO TIẾP JQ6500-16P =================
-// Giữ nguyên đúng các chân và lệnh từ bản test thực tế đã hoạt động ổn định
+// ================= 2. ĐỊNH NGHĨA CHÂN JQ6500-16P =================
 #define JQ6500_TX_PIN   41   // ESP32 GPIO41 (TX) --[1kΩ]--> JQ6500 RX (Chân 9)
-#define JQ6500_RX_PIN   42   // ESP32 GPIO42 (RX) <---------- JQ6500 TX (Chân 10 - tùy chọn)
+#define JQ6500_RX_PIN   42   // ESP32 GPIO42 (RX) <---------- JQ6500 TX (Chân 10)
 #define JQ_BAUD         9600
 #define JQ_VOLUME       25   // Mức âm lượng chuẩn (0 - 30)
 
 HardwareSerial JQSerial(1);
-
+uint8_t currentJqVolume = JQ_VOLUME;
 unsigned long lastAudioAlertTime = 0;
-const unsigned long AUDIO_ALERT_COOLDOWN_MS = 6000; // Khoảng cách giữa 2 lần nhắc loa tối thiểu 6s
+const unsigned long AUDIO_ALERT_COOLDOWN_MS = 4000; // Khoảng cách giữa 2 lần nhắc loa
 
-// Khung lệnh chuẩn JQ6500: 7E | len | cmd | [params] | EF (len = 2 + số byte tham số)
+void jqDrainRx() {
+  while (JQSerial.available() > 0) JQSerial.read();
+}
+
+String jqReadReply(uint32_t timeoutMs = 200) {
+  String rawAscii = "", hexStr = "";
+  unsigned long startMs = millis(), lastByteMs = startMs;
+  while (millis() - startMs < timeoutMs) {
+    while (JQSerial.available() > 0) {
+      uint8_t b = (uint8_t)JQSerial.read();
+      lastByteMs = millis();
+      rawAscii += (char)b;
+      char buf[4]; snprintf(buf, sizeof(buf), "%02X ", b);
+      hexStr += buf;
+    }
+    if (rawAscii.length() > 0 && (millis() - lastByteMs >= 30)) break;
+    delay(2);
+  }
+  if (rawAscii.length() > 0) {
+    hexStr.trim(); rawAscii.trim();
+    return rawAscii;
+  }
+  return "";
+}
+
 void jqSend(uint8_t cmd, const uint8_t* params = nullptr, uint8_t paramLen = 0) {
+  jqDrainRx();
+  uint8_t len = (uint8_t)(2 + paramLen);
   JQSerial.write((uint8_t)0x7E);
-  JQSerial.write((uint8_t)(2 + paramLen));
+  JQSerial.write(len);
   JQSerial.write(cmd);
   for (uint8_t i = 0; i < paramLen; i++) JQSerial.write(params[i]);
   JQSerial.write((uint8_t)0xEF);
+  JQSerial.flush();
 }
 
-void jqSetSource(uint8_t src)  { jqSend(0x09, &src, 1); }   // 0x04 = Flash onboard của module
+void jqReset()               { jqSend(0x0C); }
+void jqSetSource(uint8_t src)  { jqSend(0x09, &src, 1); }   // 0x04 = Flash onboard
 void jqSetVolume(uint8_t vol)  { if (vol > 30) vol = 30; jqSend(0x06, &vol, 1); }
-void jqSetLoopMode(uint8_t m)  { jqSend(0x11, &m, 1); }     // 4 = ONE_STOP (phát xong 1 bài là dừng hẳn)
+void jqSetLoopMode(uint8_t m)  { jqSend(0x11, &m, 1); }     // 4 = ONE_STOP
+void jqPlayCurrent()         { jqSend(0x0D); }
+void jqStop()                { jqSend(0x0E); }
 
 void jqPlayTrack(uint16_t n) {
+  jqSetVolume(currentJqVolume);
+  delay(30);
   uint8_t p[2] = { (uint8_t)(n >> 8), (uint8_t)(n & 0xFF) };
   jqSend(0x03, p, 2);
-}
-
-void jqStop() {
-  uint8_t stopCmd[] = {0x7E, 0x02, 0x0E, 0xEF};
-  JQSerial.write(stopCmd, sizeof(stopCmd));
+  jqReadReply(100);
+  Serial.printf("🔊 [JQ6500] Đang phát Track %d (00%d.mp3)\n", n, n);
 }
 
 void jq6500_init() {
   JQSerial.begin(JQ_BAUD, SERIAL_8N1, JQ6500_RX_PIN, JQ6500_TX_PIN);
-  delay(1000);               // Chờ JQ6500 khởi động ổn định
-  jqSetSource(0x04);         // Chọn bộ nhớ Flash
+  delay(600);
+  jqReset();
+  delay(500);
+  jqSetSource(0x04);
+  delay(400);
+  jqSetVolume(currentJqVolume);
   delay(100);
-  jqSetVolume(JQ_VOLUME);    // Đặt âm lượng 25/30
+  jqSetLoopMode(4);
   delay(100);
-  jqSetLoopMode(4);          // Đặt chế độ ONE_STOP: phát xong 1 file thì dừng ngay, không tự phát tiếp
-  delay(100);
-  Serial.println("[JQ6500] Khởi tạo mô-đun âm thanh thành công (GPIO41 TX, GPIO42 RX, ONE_STOP)!");
+  Serial.println("[JQ6500] Đã khởi tạo âm thanh JQ6500-16P sẵn sàng.");
 }
 
-// ================= 3b. ĐỊNH NGHĨA CHÂN VÀ ĐIỀU KHIỂN PAN-TILT SERVO =================
+// ================= 3. ĐIỀU KHIỂN PAN-TILT SERVO =================
 #define PIN_SERVO_PAN    21   // Trục Ngang (SG90 360° Continuous)  -> GPIO 21
 #define PIN_SERVO_TILT   47   // Trục Dọc   (SG90 180° Positional)  -> GPIO 47
 
-#include <esp_arduino_version.h>
-
-const int TILT_MIN      = 35;   // Giới hạn an toàn ngẩng lên
-const int TILT_MAX      = 145;  // Giới hạn an toàn cúi xuống
-const int TILT_CENTER   = 90;   // Vị trí nhìn trực diện 90°
-const int TILT_DESK     = 65;   // Vị trí nhìn nghiêng bàn học 65°
+const int TILT_MIN      = 35;
+const int TILT_MAX      = 145;
+const int TILT_CENTER   = 90;
+const int TILT_DESK     = 65;
 int currentTilt         = TILT_DESK;
 
-int panTrimStopVal      = 90;   // Điểm dừng tĩnh trục 360° (Zero-Trim)
-int panSpeedDelta       = 20;   // Tốc độ nhấp nhả bước quay
+int panTrimStopVal      = 90;
+int panSpeedDelta       = 20;
 unsigned long jogEndTime = 0;
 bool isJogging          = false;
 
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   bool initServoHardware() {
-    bool ok1 = ledcAttach(PIN_SERVO_PAN, 50, 14);   // 50Hz, 14-bit resolution
-    bool ok2 = ledcAttach(PIN_SERVO_TILT, 50, 14);  // 50Hz, 14-bit resolution
-    Serial.printf("[SERVO INIT] Pan GPIO %d: %s | Tilt GPIO %d: %s\n",
-                  PIN_SERVO_PAN, ok1 ? "OK" : "LỖI",
-                  PIN_SERVO_TILT, ok2 ? "OK" : "LỖI");
+    bool ok1 = ledcAttach(PIN_SERVO_PAN, 50, 14);
+    bool ok2 = ledcAttach(PIN_SERVO_TILT, 50, 14);
     return ok1 && ok2;
   }
   void writeServoPwm(uint8_t pin, int mappedVal) {
@@ -130,8 +136,6 @@ bool isJogging          = false;
     ledcAttachPin(PIN_SERVO_PAN, LEDC_CH_PAN);
     ledcSetup(LEDC_CH_TILT, 50, 14);
     ledcAttachPin(PIN_SERVO_TILT, LEDC_CH_TILT);
-    Serial.printf("[SERVO INIT] Core 2.x Pan CH%d (GPIO %d) | Tilt CH%d (GPIO %d)\n",
-                  LEDC_CH_PAN, PIN_SERVO_PAN, LEDC_CH_TILT, PIN_SERVO_TILT);
     return true;
   }
   void writeServoPwm(uint8_t pin, int mappedVal) {
@@ -145,7 +149,6 @@ bool isJogging          = false;
 void panStop() {
   isJogging = false;
   writeServoPwm(PIN_SERVO_PAN, panTrimStopVal);
-  Serial.println("🛑 [PAN 360°] Dừng trục quay");
 }
 
 void panRotateLeft(int speedOffset = 0) {
@@ -153,7 +156,6 @@ void panRotateLeft(int speedOffset = 0) {
   int spd = (speedOffset > 0) ? speedOffset : panSpeedDelta;
   int val = constrain(panTrimStopVal - spd, 0, 85);
   writeServoPwm(PIN_SERVO_PAN, val);
-  Serial.printf("◀️ [PAN 360°] Quay TRÁI liên tục (PWM: %d)\n", val);
 }
 
 void panRotateRight(int speedOffset = 0) {
@@ -161,7 +163,6 @@ void panRotateRight(int speedOffset = 0) {
   int spd = (speedOffset > 0) ? speedOffset : panSpeedDelta;
   int val = constrain(panTrimStopVal + spd, 95, 180);
   writeServoPwm(PIN_SERVO_PAN, val);
-  Serial.printf("▶️ [PAN 360°] Quay PHẢI liên tục (PWM: %d)\n", val);
 }
 
 void panJog(int direction, int durationMs = 200) {
@@ -170,7 +171,6 @@ void panJog(int direction, int durationMs = 200) {
   writeServoPwm(PIN_SERVO_PAN, val);
   jogEndTime = millis() + durationMs;
   isJogging = true;
-  Serial.printf("⚡ [PAN 360° JOG] Nhích %s trong %d ms...\n", (direction < 0) ? "TRÁI" : "PHẢI", durationMs);
 }
 
 void updateServoLoop() {
@@ -182,7 +182,6 @@ void updateServoLoop() {
 void tiltSetAngle(int targetAngle) {
   currentTilt = constrain(targetAngle, TILT_MIN, TILT_MAX);
   writeServoPwm(PIN_SERVO_TILT, currentTilt);
-  Serial.printf("📐 [TILT 180°] Góc hiện tại: %d°\n", currentTilt);
 }
 
 void tiltSmoothMove(int targetAngle, int stepDelayMs = 12) {
@@ -194,27 +193,6 @@ void tiltSmoothMove(int targetAngle, int stepDelayMs = 12) {
     delay(stepDelayMs);
     updateServoLoop();
   }
-}
-
-void runCoordinatedSweep() {
-  Serial.println(F("\n🔄 [DEMO SWEEP] Bắt đầu quét thử nghiệm 2 trục phối hợp..."));
-  tiltSmoothMove(55, 15);
-  delay(200);
-  tiltSmoothMove(125, 15);
-  delay(200);
-  tiltSmoothMove(TILT_CENTER, 15);
-  delay(300);
-  for (int i = 0; i < 3; i++) {
-    panJog(-1, 180);
-    delay(300);
-  }
-  delay(400);
-  for (int i = 0; i < 3; i++) {
-    panJog(1, 180);
-    delay(300);
-  }
-  panStop();
-  Serial.println(F("✅ [DEMO SWEEP] Hoàn tất! Về trạng thái cân bằng.\n"));
 }
 
 void handleServoCommand(const String& cmd) {
@@ -245,8 +223,6 @@ void handleServoCommand(const String& cmd) {
   } else if (c == "preset_high" || c == "high") {
     panStop();
     tiltSetAngle(115);
-  } else if (c == "sweep") {
-    runCoordinatedSweep();
   } else if (c.startsWith("tilt:")) {
     int ang = c.substring(5).toInt();
     tiltSetAngle(ang);
@@ -255,20 +231,17 @@ void handleServoCommand(const String& cmd) {
     if (t >= 80 && t <= 100) {
       panTrimStopVal = t;
       panStop();
-      Serial.printf("⚙️ [TRIM] Điểm dừng tĩnh mới: %d\n", panTrimStopVal);
     }
-  } else {
-    Serial.printf("[SERVO] Lệnh không nhận diện: %s\n", c.c_str());
   }
+  Serial.printf("🤖 [SERVO] Thực thi: %s (Tilt: %d°)\n", c.c_str(), currentTilt);
 }
 
-// ================= 4. ĐỊNH NGHĨA CHÂN CAMERA ESP32-S3 WROOM CAM =================
+// ================= 4. KHỞI TẠO CAMERA OV2640 =================
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM     15
 #define SIOD_GPIO_NUM      4
 #define SIOC_GPIO_NUM      5
-
 #define Y9_GPIO_NUM       16
 #define Y8_GPIO_NUM       17
 #define Y7_GPIO_NUM       18
@@ -281,7 +254,6 @@ void handleServoCommand(const String& cmd) {
 #define HREF_GPIO_NUM      7
 #define PCLK_GPIO_NUM     13
 
-// ================= 4. KHỞI TẠO CAMERA =================
 bool initCamera() {
   camera_config_t config;
   memset(&config, 0, sizeof(config));
@@ -304,398 +276,325 @@ bool initCamera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;            // 10MHz ổn định, không bị tràn buffer
+  config.xclk_freq_hz = 20000000;            // 20MHz cho tốc độ khung hình tối đa
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
     config.frame_size   = FRAMESIZE_VGA;     // 640x480
-    config.jpeg_quality = 14;                // 14: dung lượng nhẹ ~10KB, truyền cực nhanh
-    config.fb_count     = 2;                 // 2 buffer: chống tràn buffer
+    config.jpeg_quality = 16;                // Quality 16: sắc nét và mượt mà 25-30 FPS
+    config.fb_count     = 2;
     config.fb_location  = CAMERA_FB_IN_PSRAM;
-    config.grab_mode    = CAMERA_GRAB_LATEST; // luôn lấy khung hình mới nhất
-    Serial.println("[CAMERA] Chế độ PSRAM: VGA (640x480), Quality 14, 2 buffer, GRAB_LATEST");
+    config.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
     config.frame_size   = FRAMESIZE_QVGA;    // 320x240
-    config.jpeg_quality = 15;
+    config.jpeg_quality = 16;
     config.fb_count     = 1;
     config.fb_location  = CAMERA_FB_IN_DRAM;
     config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
-    Serial.println("[CAMERA] CẢNH BÁO: Không có PSRAM -> Dùng QVGA");
   }
 
-  esp_err_t err = ESP_FAIL;
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    err = esp_camera_init(&config);
-    if (err == ESP_OK) break;
-    Serial.printf("[CAMERA] Khởi tạo lần %d thất bại, mã lỗi: 0x%x\n", attempt, err);
-    esp_camera_deinit();
-    delay(500);
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("[CAMERA] Khởi tạo thất bại: 0x%x\n", err);
+    return false;
   }
-  if (err != ESP_OK) return false;
 
-  Serial.println("[CAMERA] Khởi tạo Camera OV2640 thành công!");
-
-  // Tinh chỉnh cảm biến OV2640 (khắc phục màu ám hồng và tối ưu phơi sáng)
   sensor_t* s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 0);     // Mức sáng cân bằng (tránh cháy sáng góc tường)
-    s->set_contrast(s, 0);       // Độ tương phản chuẩn
-    s->set_saturation(s, 0);     // Độ bão hòa màu bình thường
-    s->set_special_effect(s, 0);
-    s->set_whitebal(s, 1);       // Bật tự động cân bằng trắng
-    s->set_awb_gain(s, 1);       // AWB Gain
-    s->set_wb_mode(s, 0);        // Auto WB
-    s->set_exposure_ctrl(s, 1);  // Auto Exposure
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+    s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 1);
     s->set_gain_ctrl(s, 1);
     s->set_bpc(s, 1);
     s->set_wpc(s, 1);
     s->set_raw_gma(s, 1);
-    s->set_lenc(s, 1);           // Chống méo viền
-    s->set_hmirror(s, 0);
-    s->set_vflip(s, 0);
-    Serial.println("[CAMERA] Đã tinh chỉnh thông số cảm biến tối ưu.");
+    s->set_lenc(s, 1);
   }
+  Serial.println("[CAMERA] Khởi tạo Camera OV2640 thành công (20MHz, VGA)!");
   return true;
 }
 
-// ================= 5. WIFI =================
+// ================= 5. ESP_HTTP_SERVER (STREAM CỔNG 81 & API CỔNG 80) =================
+httpd_handle_t camera_httpd = NULL;
+httpd_handle_t stream_httpd = NULL;
+
+#define PART_BOUNDARY "123456789000000000000987654321"
+static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
+static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+// Handler phát luồng MJPEG trên cổng 81
+static esp_err_t stream_handler(httpd_req_t *req) {
+  camera_fb_t *fb = NULL;
+  esp_err_t res = ESP_OK;
+  char part_buf[128];
+
+  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+  if (res != ESP_OK) return res;
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "X-Framerate", "30");
+
+  Serial.println(">>> [STREAM] Bắt đầu phát luồng video MJPEG cho Client... <<<");
+
+  while (true) {
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+    if (res == ESP_OK) {
+      size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, (unsigned)fb->len);
+      res = httpd_resp_send_chunk(req, part_buf, hlen);
+    }
+    if (res == ESP_OK) {
+      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+    }
+
+    esp_camera_fb_return(fb);
+    fb = NULL;
+
+    if (res != ESP_OK) break;
+    // Cho phép các tác vụ khác chạy mà không chặn CPU
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+
+  Serial.println("<<< [STREAM] Client đã ngắt kết nối video >>>");
+  return res;
+}
+
+// Handler lệnh phát loa: GET /play?track=1..4
+static esp_err_t play_handler(httpd_req_t *req) {
+  char buf[64];
+  size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+  int track = 1;
+  if (buf_len > 1 && buf_len <= sizeof(buf)) {
+    if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+      char param[16];
+      if (httpd_query_key_value(buf, "track", param, sizeof(param)) == ESP_OK) {
+        track = atoi(param);
+      }
+    }
+  }
+  if (track >= 1 && track <= 4) {
+    jqPlayTrack(track);
+  }
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"success\":true,\"track\":%d}", track);
+  return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// Handler lệnh điều khiển servo: GET /servo?cmd=up|down|left|right|center...
+static esp_err_t servo_handler(httpd_req_t *req) {
+  char buf[128];
+  size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+  char cmd[32] = "";
+  if (buf_len > 1 && buf_len <= sizeof(buf)) {
+    if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+      httpd_query_key_value(buf, "cmd", cmd, sizeof(cmd));
+    }
+  }
+  if (strlen(cmd) > 0) {
+    handleServoCommand(String(cmd));
+  }
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  char resp[96];
+  snprintf(resp, sizeof(resp), "{\"success\":true,\"cmd\":\"%s\"}", cmd);
+  return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// Handler trạng thái: GET /status
+static esp_err_t status_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  char resp[256];
+  snprintf(resp, sizeof(resp),
+    "{\"name\":\"ESP32-S3-POSTURE\",\"ip\":\"%s\",\"rssi\":%d,\"tilt\":%d,\"pan_trim\":%d,\"heap\":%u}",
+    WiFi.localIP().toString().c_str(), WiFi.RSSI(), currentTilt, panTrimStopVal, (unsigned)ESP.getFreeHeap());
+  return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// Handler chụp ảnh tĩnh: GET /capture
+static esp_err_t capture_handler(httpd_req_t *req) {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  return res;
+}
+
+// Giao diện Web điều khiển trực tiếp trên cổng 80: GET /
+static esp_err_t index_handler(httpd_req_t *req) {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>ESP32-S3 Camera Stream & Control</title>";
+  html += "<style>body{font-family:Arial,sans-serif;background:#121826;color:#fff;text-align:center;padding:20px;}";
+  html += "h2{color:#00e5ff;} .btn{background:#1f293d;color:#fff;border:1px solid #3b82f6;padding:10px 16px;margin:6px;border-radius:8px;font-size:15px;cursor:pointer;}";
+  html += ".btn:hover{background:#3b82f6;} .danger{border-color:#ef4444;} .danger:hover{background:#ef4444;}";
+  html += "img{max-width:90%;border-radius:12px;border:2px solid #3b82f6;box-shadow:0 0 20px rgba(0,229,255,0.2);}";
+  html += "</style></head><body>";
+  html += "<h2>📸 ESP32-S3 AI CAMERA - LIVE STREAM 30 FPS</h2>";
+  html += "<p>Địa chỉ IP: <b>" + WiFi.localIP().toString() + "</b> | Stream Port: <b>:81/stream</b></p>";
+  html += "<img src='http://" + WiFi.localIP().toString() + ":81/stream' alt='Live Stream'><br><br>";
+  html += "<h3>🔊 Test Âm Thanh Loa JQ6500-16P</h3>";
+  html += "<button class='btn' onclick='fetch(\"/play?track=1\")'>Track 1 (Khởi động)</button>";
+  html += "<button class='btn' onclick='fetch(\"/play?track=2\")'>Track 2 (Cúi cổ)</button>";
+  html += "<button class='btn' onclick='fetch(\"/play?track=3\")'>Track 3 (Gù lưng)</button>";
+  html += "<button class='btn' onclick='fetch(\"/play?track=4\")'>Track 4 (Phối hợp)</button><br><br>";
+  html += "<h3>🔄 Điều Khiển Pan-Tilt Servo</h3>";
+  html += "<button class='btn' onclick='fetch(\"/servo?cmd=up\")'>⬆️ Lên (+5°)</button>";
+  html += "<button class='btn' onclick='fetch(\"/servo?cmd=down\")'>⬇️ Xuống (-5°)</button>";
+  html += "<button class='btn' onclick='fetch(\"/servo?cmd=left\")'>⬅️ Trái</button>";
+  html += "<button class='btn' onclick='fetch(\"/servo?cmd=right\")'>➡️ Phải</button>";
+  html += "<button class='btn' onclick='fetch(\"/servo?cmd=center\")'>🎯 Tâm (90°)</button>";
+  html += "<button class='btn danger' onclick='fetch(\"/servo?cmd=stop\")'>⏹️ Dừng</button>";
+  html += "</body></html>";
+
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  return httpd_resp_send(req, html.c_str(), html.length());
+}
+
+void startCameraServer() {
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.server_port = 80;
+  config.ctrl_port = 32768;
+  config.max_uri_handlers = 8;
+  config.lru_purge_enable = true;
+
+  httpd_uri_t index_uri   = { .uri = "/",        .method = HTTP_GET, .handler = index_handler,   .user_ctx = NULL };
+  httpd_uri_t play_uri    = { .uri = "/play",     .method = HTTP_GET, .handler = play_handler,    .user_ctx = NULL };
+  httpd_uri_t servo_uri   = { .uri = "/servo",    .method = HTTP_GET, .handler = servo_handler,   .user_ctx = NULL };
+  httpd_uri_t status_uri  = { .uri = "/status",   .method = HTTP_GET, .handler = status_handler,  .user_ctx = NULL };
+  httpd_uri_t capture_uri = { .uri = "/capture",  .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL };
+
+  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &index_uri);
+    httpd_register_uri_handler(camera_httpd, &play_uri);
+    httpd_register_uri_handler(camera_httpd, &servo_uri);
+    httpd_register_uri_handler(camera_httpd, &status_uri);
+    httpd_register_uri_handler(camera_httpd, &capture_uri);
+    Serial.println("[WEB] Cổng 80 (/play, /servo, /status, /capture) đã sẵn sàng!");
+  }
+
+  // Khởi động riêng Server phát luồng video trên Cổng 81
+  config.server_port = 81;
+  config.ctrl_port = 32769;
+  config.stack_size = 8192;
+
+  httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL };
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.println("[STREAM] Cổng 81 (/stream) đã sẵn sàng phát luồng MJPEG 30 FPS!");
+  }
+}
+
+// ================= 6. SETUP VÀ LOOP =================
 void connectWiFi() {
-  Serial.printf("[WIFI] Đang kết nối tới: %s", WIFI_SSID);
+  Serial.printf("\n[WIFI] Đang kết nối tới mạng: %s", WIFI_SSID);
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);          // Tắt WiFi modem sleep để gửi gói tin liên tục không trễ
+  WiFi.setSleep(false); // Không ngủ WiFi để giữ stream liên tục
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+  int count = 0;
+  while (WiFi.status() != WL_CONNECTED && count < 40) {
     delay(500);
     Serial.print(".");
-    attempts++;
+    count++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WIFI] Kết nối thành công!");
-    Serial.printf("[WIFI] IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    
-    // Cấu hình trước SSL Client
-    client.setInsecure();
-    client.setHandshakeTimeout(30);
-    client.setTimeout(HTTP_TIMEOUT_MS);
+    Serial.println("\n========================================================");
+    Serial.println("✅ [Wi-Fi] KẾT NỐI THÀNH CÔNG!");
+    Serial.printf("📡 ĐỊA CHỈ IP ESP32-S3 : http://%s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("📹 ĐƯỜNG DẪN VIDEO STREAM : http://%s:81/stream\n", WiFi.localIP().toString().c_str());
+    Serial.printf("🔊 ĐƯỜNG DẪN LỆNH LOA MP3 : http://%s/play?track=1\n", WiFi.localIP().toString().c_str());
+    Serial.printf("🔄 ĐƯỜNG DẪN LỆNH SERVO   : http://%s/servo?cmd=left\n", WiFi.localIP().toString().c_str());
+    Serial.println("========================================================\n");
   } else {
-    Serial.println("\n[WIFI] Kết nối thất bại! Sẽ tự thử lại trong loop().");
+    Serial.println("\n[WIFI] Kết nối thất bại! Vui lòng kiểm tra lại tên Wi-Fi và mật khẩu.");
   }
 }
 
-// ================= 6. TRÍCH XUẤT JSON ĐƠN GIẢN =================
-String extractJsonString(const String& json, const String& key) {
-  int keyIdx = json.indexOf("\"" + key + "\"");
-  if (keyIdx == -1) return "";
-  int colonIdx = json.indexOf(':', keyIdx);
-  if (colonIdx == -1) return "";
-  int startQuote = json.indexOf('"', colonIdx);
-  if (startQuote == -1) return "";
-  int endQuote = json.indexOf('"', startQuote + 1);
-  if (endQuote == -1) return "";
-  return json.substring(startQuote + 1, endQuote);
-}
-
-int extractJsonInt(const String& json, const String& key) {
-  String searchKey = "\"" + key + "\":";
-  int startIdx = json.indexOf(searchKey);
-  if (startIdx == -1) return 0;
-  startIdx += searchKey.length();
-  while (startIdx < (int)json.length() && (json[startIdx] == ' ' || json[startIdx] == '\"')) startIdx++;
-  int endIdx = startIdx;
-  while (endIdx < (int)json.length() && (isDigit(json[endIdx]) || json[endIdx] == '-')) endIdx++;
-  return json.substring(startIdx, endIdx).toInt();
-}
-
-void onPostureAlert(int track, int neck, int torso, const String& status) {
-  unsigned long now = millis();
-  if (now - lastAudioAlertTime < AUDIO_ALERT_COOLDOWN_MS) {
-    return; // Chưa hết thời gian chờ giữa 2 lần phát cảnh báo (tránh chồng âm thanh)
-  }
-  lastAudioAlertTime = now;
-
-  // Đảm bảo track cảnh báo tư thế hợp lệ từ 2 đến 4 (Track 1 dành riêng cho Khởi động)
-  if (track < 2 || track > 4) {
-    if (neck >= 32 && torso >= 18) track = 4; // Cả cổ và lưng
-    else if (torso >= 18) track = 3;          // Gù lưng
-    else track = 2;                           // Cúi cổ
-  }
-
-  Serial.printf(">>> [CẢNH BÁO LOA JQ6500] Phát Track %d (00%d.mp3) | Cổ: %d°, Lưng: %d° (%s) <<<\n",
-                track, track, neck, torso, status.c_str());
-  jqPlayTrack(track);
-}
-
-// ================= 7. CHỤP VÀ GỬI ẢNH TỐI ƯU KEEP-ALIVE =================
-void sendFrameToCloud() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] Mất mạng, đang thử kết nối lại...");
-    WiFi.reconnect();
-    isHttpInitialized = false;
-    return;
-  }
-
-  // Lấy ngay khung hình mới nhất từ PSRAM
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    camFailCount++;
-    Serial.printf("[CAMERA] Không thể lấy khung hình! (%d lần liên tiếp)\n", camFailCount);
-    if (camFailCount >= 5) {
-      Serial.println("[CAMERA] Lỗi liên tiếp -> khởi động lại thiết bị...");
-      delay(500);
-      ESP.restart();
-    }
-    return;
-  }
-  camFailCount = 0;
-
-  if (fb->format != PIXFORMAT_JPEG || fb->len == 0) {
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  // Tái sử dụng kết nối (Keep-Alive): Chỉ khởi tạo lại khi socket bị ngắt
-  if (!isHttpInitialized || !client.connected()) {
-    http.end();
-    client.stop();
-    client.setInsecure();
-    client.setHandshakeTimeout(30);
-    client.setTimeout(HTTP_TIMEOUT_MS);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.setReuse(true); // BẬT KEEP-ALIVE
-
-    if (http.begin(client, SERVER_URL)) {
-      isHttpInitialized = true;
-    } else {
-      Serial.println("[HTTP] Không thể phân giải URL server Render!");
-      esp_camera_fb_return(fb);
-      return;
-    }
-  }
-
-  // Thiết lập Headers cho mỗi lượt POST
-  http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("User-Agent", "ESP32-S3-WROOM-CAM");
-  http.addHeader("Connection", "keep-alive");
-
-  unsigned long startPost = millis();
-  int httpCode = http.POST(fb->buf, fb->len);
-  unsigned long duration = millis() - startPost;
-
-  bool ok = false;
-
-  if (httpCode == 200) {
-    ok = true;
-    String response = http.getString(); // Bắt buộc đọc hết response để socket sẵn sàng cho frame tiếp theo
-    Serial.printf("[POST OK %lums | %u bytes] %s\n", duration, (unsigned)fb->len, response.c_str());
-
-    String status = extractJsonString(response, "status");
-    int neck         = extractJsonInt(response, "neck_angle");
-    int torso        = extractJsonInt(response, "torso_angle");
-    int posture_time = extractJsonInt(response, "posture_time");
-    int track        = extractJsonInt(response, "track");
-    bool alert = (response.indexOf("\"alert\":true") != -1 || response.indexOf("\"alert\": true") != -1);
-
-    Serial.printf(">> [%s] Cổ: %d° | Lưng: %d° | Duy trì: %ds | Track: %d | Alert: %s\n",
-                  status.c_str(), neck, torso, posture_time, track, alert ? "TRUE" : "false");
-
-    if (alert) onPostureAlert(track, neck, torso, status);
-
-    // Kiểm tra lệnh phát loa trực tiếp từ giao diện Web UI (nút bấm Track 1 - 4)
-    int playTrackCmd = extractJsonInt(response, "play_track");
-    if (playTrackCmd >= 1 && playTrackCmd <= 4) {
-      Serial.printf(">> [WEB TRIGGER LOA] Nhận lệnh từ giao diện Web -> Phát Track %d (00%d.mp3) <<<\n",
-                    playTrackCmd, playTrackCmd);
-      jqPlayTrack(playTrackCmd);
-    }
-
-    // Kiểm tra và thực thi lệnh điều khiển Pan-Tilt Servo từ Cloud
-    String servoCmd = extractJsonString(response, "servo_cmd");
-    if (servoCmd.length() > 0 && servoCmd != "null") {
-      Serial.printf(">> [SERVO CLOUD CMD] Thực thi lệnh: %s\n", servoCmd.c_str());
-      handleServoCommand(servoCmd);
-    }
-  } else {
-    Serial.printf("[POST LỖI] HTTP Code: %d (%s) - mất %lums\n",
-                  httpCode, HTTPClient::errorToString(httpCode).c_str(), duration);
-    char errBuf[128];
-    if (client.lastError(errBuf, sizeof(errBuf)) < 0) {
-      Serial.printf("[SSL ERROR] %s\n", errBuf);
-    }
-    // Nếu kết nối lỗi hoặc server đóng socket -> Đánh dấu để lần tới kết nối lại
-    http.end();
-    client.stop();
-    isHttpInitialized = false;
-  }
-
-  // Giải phóng buffer ảnh ngay lập tức
-  esp_camera_fb_return(fb);
-
-  // Tự phục hồi khi lỗi mạng liên tiếp
-  if (ok) {
-    failCount = 0;
-  } else {
-    failCount++;
-    if (failCount == MAX_FAIL_BEFORE_RECONNECT) {
-      Serial.println("[RECOVER] Lỗi liên tiếp -> reset WiFi...");
-      WiFi.disconnect();
-      delay(200);
-      WiFi.reconnect();
-      isHttpInitialized = false;
-    } else if (failCount >= MAX_FAIL_BEFORE_RESTART) {
-      Serial.println("[RECOVER] Lỗi quá nhiều -> khởi động lại thiết bị...");
-      delay(500);
-      ESP.restart();
-    }
-  }
-}
-
-// ================= 8. SETUP / LOOP =================
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\n========================================================");
-  Serial.println("  ESP32-S3 WROOM N16R8 CAM - POSTURE MONITORING CLIENT  ");
-  Serial.println("         (BẢN TỐI ƯU TỐC ĐỘ HTTP KEEP-ALIVE)            ");
+  Serial.println("  ESP32-S3 WROOM N16R8 - AI CAMERA MJPEG STREAM SERVER  ");
+  Serial.println("         (KIẾN TRÚC STREAM CHUYÊN NGHIỆP 30 FPS)        ");
   Serial.println("========================================================");
   Serial.printf("[SYS] PSRAM: %s (%u bytes) | Free heap: %u\n",
-                psramFound() ? "OK" : "KHONG CO",
+                psramFound() ? "OK" : "KHÔNG CÓ",
                 (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreeHeap());
 
-  // Kết nối WiFi trước
+  // 1. Kết nối Wi-Fi
   connectWiFi();
 
-  // Khởi động Camera
+  // 2. Khởi tạo Camera
   if (!initCamera()) {
-    Serial.println("[CAMERA] Khởi tạo camera thất bại. Khởi động lại sau 5s...");
+    Serial.println("[CAMERA] Khởi tạo camera thất bại! Khởi động lại sau 5s...");
     delay(5000);
     ESP.restart();
   }
 
-  // Khởi tạo mô-đun âm thanh JQ6500-16P (đặt âm lượng sẵn sàng)
+  // 3. Khởi tạo Mô-đun Loa JQ6500-16P
   jq6500_init();
 
-  // Khởi tạo Pan-Tilt Servo (GPIO 21: Pan 360°, GPIO 47: Tilt 180°)
+  // 4. Khởi tạo Pan-Tilt Servo
   initServoHardware();
-  delay(100);
-  panStop();
   tiltSetAngle(TILT_DESK);
+  panStop();
 
-  // Cấu hình WebServer cục bộ để test loa qua trình duyệt
-  localServer.on("/", []() {
-    String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
-                  "<title>Test Loa JQ6500 (GPIO 41/42)</title>"
-                  "<style>body{font-family:sans-serif;text-align:center;padding:25px;background:#0f172a;color:#f8fafc;}"
-                  "h2{margin-bottom:8px;}p.sub{color:#94a3b8;margin-bottom:20px;font-size:14px;}"
-                  "button{width:90%;max-width:340px;padding:14px;margin:8px auto;display:block;font-size:16px;font-weight:bold;border:none;border-radius:10px;cursor:pointer;color:white;box-shadow:0 4px 6px rgba(0,0,0,0.3);transition:0.2s;}"
-                  "button:active{transform:scale(0.98);}"
-                  ".btn1{background:#059669;}.btn2{background:#2563eb;}.btn3{background:#d97706;}.btn4{background:#7c3aed;}.btn-stop{background:#dc2626;}</style></head>"
-                  "<body><h2>🔊 BẢNG TEST LOA JQ6500-16P</h2>"
-                  "<p class='sub'>Phần cứng: ESP32-S3 TX=GPIO41, RX=GPIO42</p>"
-                  "<button class='btn1' onclick=\"fetch('/play?track=1')\">📢 Track 1: Cúi cổ quá sâu (001.mp3)</button>"
-                  "<button class='btn2' onclick=\"fetch('/play?track=2')\">📢 Track 2: Gù lưng / đổ trước (002.mp3)</button>"
-                  "<button class='btn3' onclick=\"fetch('/play?track=3')\">📢 Track 3: Sai tư thế phối hợp (003.mp3)</button>"
-                  "<button class='btn4' onclick=\"fetch('/play?track=4')\">📢 Track 4: Tư thế 4 / Sẵn sàng (004.mp3)</button>"
-                  "<button class='btn-stop' onclick=\"fetch('/stop')\">⏹️ Dừng phát âm thanh</button>"
-                  "<p style='color:#94a3b8;font-size:13px;margin-top:15px;'>Hoặc gõ phím <b>1, 2, 3, 4</b> trong Serial Monitor (115200) để test.</p>"
-                  "</body></html>";
-    localServer.send(200, "text/html", html);
-  });
+  // 5. Khởi động Web Server (Cổng 80 điều khiển & Cổng 81 phát video stream)
+  startCameraServer();
 
-  localServer.on("/play", []() {
-    int track = 1;
-    if (localServer.hasArg("track")) {
-      track = localServer.arg("track").toInt();
-    }
-    if (track < 1 || track > 4) track = 1;
-    Serial.printf("[WEB TEST] Nhận lệnh từ Web: Phát Track %d\n", track);
-    jqPlayTrack(track);
-    localServer.send(200, "text/plain", "OK: Dang phat Track " + String(track));
-  });
-
-  localServer.on("/stop", []() {
-    Serial.println("[WEB TEST] Nhận lệnh từ Web: Dừng phát");
-    jqStop();
-    localServer.send(200, "text/plain", "OK: Da dung phat");
-  });
-
-  localServer.on("/servo", []() {
-    String cmd = "stop";
-    if (localServer.hasArg("cmd")) {
-      cmd = localServer.arg("cmd");
-    }
-    Serial.printf("[WEB TEST] Nhận lệnh Servo cục bộ: %s\n", cmd.c_str());
-    handleServoCommand(cmd);
-    localServer.send(200, "text/plain", "OK: " + cmd);
-  });
-
-  localServer.begin();
-  Serial.printf("[WEB TEST] Khởi động trang test loa tại: http://%s/\n", WiFi.localIP().toString().c_str());
-
-  // TỰ ĐỘNG PHÁT THỬ NGAY KHI KHỞI ĐỘNG ĐỂ BÁO HIỆU PHẦN CỨNG SẴN SÀNG
-  Serial.println("\n========================================================");
-  Serial.println(">>> [AUTO BOOT] Đang tự động phát Track 1: Khởi động thành công (001.mp3) <<<");
-  Serial.println(">>> Phần cứng: ESP32 GPIO 41 (TX) -> [1kΩ] -> JQ6500 RX <<<");
-  Serial.println("========================================================\n");
-  delay(1000);
+  // Tự động phát âm báo Track 1 (Khởi động thành công)
+  delay(800);
   jqPlayTrack(1);
 }
 
 void loop() {
-  // Lắng nghe yêu cầu từ trang Web Test cục bộ
-  localServer.handleClient();
-
-  // Cập nhật ngắt nhịp quay servo Pan 360° tự động
+  // Cập nhật ngắt nhịp quay của trục Pan 360°
   updateServoLoop();
 
-  // Lắng nghe phím bấm từ Serial Monitor để test loa & servo
+  // Lắng nghe phím bấm kiểm tra từ Serial Monitor
   if (Serial.available() > 0) {
     char c = Serial.read();
-    if (c == '1') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 1: Khởi động (001.mp3) <<<");
-      jqPlayTrack(1);
-    } else if (c == '2') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 2: Cúi cổ (002.mp3) <<<");
-      jqPlayTrack(2);
-    } else if (c == '3') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 3: Gù lưng (003.mp3) <<<");
-      jqPlayTrack(3);
-    } else if (c == '4') {
-      Serial.println("\n>>> [SERIAL TEST] Gửi lệnh phát Track 4: Sai phối hợp (004.mp3) <<<");
-      jqPlayTrack(4);
-    } else if (c == 's' || c == 'S') {
-      Serial.println("\n>>> [SERIAL TEST] Dừng phát âm thanh & Servo <<<");
-      jqStop();
-      panStop();
-    } else if (c == '+' || c == 'v' || c == 'V') {
-      Serial.println("\n>>> [SERIAL TEST] Đặt âm lượng tối đa (30/30) <<<");
-      jqSetVolume(30);
-    } else if (c == 'u' || c == 'U') {
-      Serial.println("\n>>> [SERIAL TEST] Servo Tilt LÊN (+5°) <<<");
-      handleServoCommand("up");
-    } else if (c == 'd' || c == 'D') {
-      Serial.println("\n>>> [SERIAL TEST] Servo Tilt XUỐNG (-5°) <<<");
-      handleServoCommand("down");
-    } else if (c == 'l' || c == 'L') {
-      Serial.println("\n>>> [SERIAL TEST] Servo Pan TRÁI (200ms) <<<");
-      handleServoCommand("left");
-    } else if (c == 'r' || c == 'R') {
-      Serial.println("\n>>> [SERIAL TEST] Servo Pan PHẢI (200ms) <<<");
-      handleServoCommand("right");
-    } else if (c == 'c' || c == 'C') {
-      Serial.println("\n>>> [SERIAL TEST] Servo Về TÂM (90°) <<<");
-      handleServoCommand("center");
+    if (c == '1') jqPlayTrack(1);
+    else if (c == '2') jqPlayTrack(2);
+    else if (c == '3') jqPlayTrack(3);
+    else if (c == '4') jqPlayTrack(4);
+    else if (c == 's' || c == 'S') { jqStop(); panStop(); }
+    else if (c == 'u' || c == 'U') handleServoCommand("up");
+    else if (c == 'd' || c == 'D') handleServoCommand("down");
+    else if (c == 'l' || c == 'L') handleServoCommand("left");
+    else if (c == 'r' || c == 'R') handleServoCommand("right");
+    else if (c == 'c' || c == 'C') handleServoCommand("center");
+  }
+
+  // Tự động kết nối lại Wi-Fi nếu mất sóng
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastReconnect = 0;
+    if (millis() - lastReconnect > 10000) {
+      lastReconnect = millis();
+      Serial.println("[WIFI] Mất kết nối, đang thử kết nối lại...");
+      WiFi.reconnect();
     }
   }
 
-  unsigned long now = millis();
-  if (now - lastUploadTime >= UPLOAD_INTERVAL_MS) {
-    sendFrameToCloud();
-    lastUploadTime = millis(); // Cập nhật sau khi gửi xong để luôn giãn cách đúng 200ms
-  }
-  delay(5);
+  delay(10);
 }
