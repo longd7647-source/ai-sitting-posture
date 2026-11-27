@@ -21,11 +21,10 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Khởi tạo MediaPipe Pose
-# Bật static_image_mode=True để phân tích chính xác từng frame rời từ ESP32 không bị trôi điểm
+# Khởi tạo MediaPipe Pose tối ưu tốc độ cao (Video Tracking Mode + Lite Model)
 pose = mp_pose.Pose(
-    static_image_mode=True,
-    model_complexity=1,
+    static_image_mode=False,
+    model_complexity=0,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
@@ -103,58 +102,72 @@ pending_track_cmd = 0
 VN_TZ = timezone(timedelta(hours=7))
 
 # Tải font chữ hỗ trợ tiếng Việt mượt mà trên Render Linux
-cached_font = None
+# Bộ đệm Font chữ tối ưu tốc độ vẽ (tránh tải lại font mỗi frame)
+font_cache = {}
 
 def get_vietnamese_font(font_size=24):
-    global cached_font
-    if cached_font is not None:
-        return cached_font
+    if font_size in font_cache:
+        return font_cache[font_size]
 
     font_candidates = [
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
         "arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        os.path.join(os.path.dirname(__file__), "Roboto-Regular.ttf"),
         "Roboto-Regular.ttf"
     ]
 
     for fpath in font_candidates:
         if os.path.exists(fpath):
             try:
-                cached_font = ImageFont.truetype(fpath, font_size)
-                return cached_font
+                font = ImageFont.truetype(fpath, font_size)
+                font_cache[font_size] = font
+                return font
             except Exception:
                 pass
 
     try:
-        font_url = "https://raw.githubusercontent.com/google/fonts/main/apache/roboto/Roboto-Regular.ttf"
         local_font_path = os.path.join(os.path.dirname(__file__), "Roboto-Regular.ttf")
         if not os.path.exists(local_font_path):
-            r = requests.get(font_url, timeout=5)
+            font_url = "https://raw.githubusercontent.com/google/fonts/main/apache/roboto/Roboto-Regular.ttf"
+            r = requests.get(font_url, timeout=3)
             if r.status_code == 200:
                 with open(local_font_path, "wb") as f:
                     f.write(r.content)
         if os.path.exists(local_font_path):
-            cached_font = ImageFont.truetype(local_font_path, font_size)
-            return cached_font
-    except Exception as e:
-        print(f"Không thể tải font ngoài: {e}")
+            font = ImageFont.truetype(local_font_path, font_size)
+            font_cache[font_size] = font
+            return font
+    except Exception:
+        pass
 
-    cached_font = ImageFont.load_default()
-    return cached_font
+    font = ImageFont.load_default()
+    font_cache[font_size] = font
+    return font
 
-def draw_text_vietnamese(image, text, position, font_size=24, color=(0, 255, 0)):
-    """Vẽ chữ tiếng Việt có dấu lên ảnh OpenCV thông qua Pillow"""
+def draw_multiple_texts_vietnamese(image, text_items):
+    """
+    Vẽ nhiều dòng chữ tiếng Việt lên ảnh OpenCV chỉ với 1 lần chuyển đổi PIL duy nhất.
+    text_items: list of tuples (text, position, font_size, color)
+    """
     try:
-        font = get_vietnamese_font(font_size)
         image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(image_pil)
-        fill_color = (color[2], color[1], color[0]) if len(color) == 3 else color
-        draw.text(position, text, font=font, fill=fill_color)
+        for text, position, font_size, color in text_items:
+            font = get_vietnamese_font(font_size)
+            fill_color = (color[2], color[1], color[0]) if len(color) == 3 else color
+            draw.text(position, text, font=font, fill=fill_color)
         return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    except Exception as e:
-        cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    except Exception:
+        for text, position, font_size, color in text_items:
+            cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         return image
+
+def draw_text_vietnamese(image, text, position, font_size=24, color=(0, 255, 0)):
+    return draw_multiple_texts_vietnamese(image, [(text, position, font_size, color)])
 
 def calculate_angle_vertical(p1, p2):
     """Tính góc nghiêng của đường thẳng p1->p2 so với phương thẳng đứng (độ)"""
@@ -249,9 +262,10 @@ def upload_frame():
     last_camera_packet_time = now
     h, w = image.shape[:2]
 
-    # Xử lý qua MediaPipe Pose
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = pose.process(image_rgb)
+    # Xử lý qua MediaPipe Pose: Resize ảnh (320x240) để tăng tốc độ phân tích AI gấp 4 lần
+    small_rgb = cv2.resize(image, (320, 240))
+    small_rgb = cv2.cvtColor(small_rgb, cv2.COLOR_BGR2RGB)
+    results = pose.process(small_rgb)
 
     green = (0, 255, 127) # Chuẩn
     red = (50, 50, 255)   # Sai
@@ -410,20 +424,24 @@ def upload_frame():
         cv2.circle(image, ear_pt, 5, (255, 200, 0), -1)
         cv2.circle(image, shoulder_pt, 5, (0, 255, 255), -1)
 
-        # Chú thích lên ảnh
-        image = draw_text_vietnamese(image, f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color)
-        image = draw_text_vietnamese(image, f"Góc cam: {camera_view_label}", (15, 55), 18, (255, 255, 255))
-        image = draw_text_vietnamese(image, f"{posture_status}: {posture_time}s", (15, h - 35), 24, color)
+        # Chú thích lên ảnh (gom chung vẽ 1 lần siêu nhanh)
+        vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
+        image = draw_multiple_texts_vietnamese(image, [
+            (f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color),
+            (f"Góc cam: {camera_view_label}", (15, 55), 18, (255, 255, 255)),
+            (f"{posture_status}: {posture_time}s", (15, h - 35), 24, color),
+            (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
+        ])
 
     else:
         posture_status = "Không phát hiện người"
-        image = draw_text_vietnamese(image, "Không thể nhận diện tư thế", (15, 30), 22, red)
         good_start_time = None
         bad_start_time = None
-
-    # Hiển thị giờ Việt Nam chuẩn (UTC+7)
-    vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
-    image = draw_text_vietnamese(image, f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
+        vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
+        image = draw_multiple_texts_vietnamese(image, [
+            ("Không thể nhận diện tư thế", (15, 30), 22, red),
+            (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
+        ])
 
     # Mã hóa JPEG đưa vào luồng phát Web
     ret, jpeg_buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -513,7 +531,7 @@ def generate_mjpeg_stream():
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_to_send + b'\r\n')
-        time.sleep(0.08)
+        time.sleep(0.02) # Giảm trễ luồng Web xuống ~50 FPS mượt mà
 
 @app.route('/video_feed')
 def video_feed():
@@ -530,6 +548,30 @@ def api_status():
             res["status"] = "Mất kết nối camera"
             res["alert"] = False
     return jsonify(res)
+
+@app.route('/api/sync', methods=['POST'])
+def api_sync():
+    """Nhận dữ liệu đồng bộ từ Local Server lên Cloud Render"""
+    global latest_processed_frame, status_data, last_camera_packet_time
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "No JSON data"}), 400
+
+    with data_lock:
+        if "status_data" in data and isinstance(data["status_data"], dict):
+            status_data.update(data["status_data"])
+            status_data["last_update"] = time.time()
+            status_data["is_connected"] = True
+        last_camera_packet_time = time.time()
+
+        if "frame_b64" in data and data["frame_b64"]:
+            import base64
+            try:
+                latest_processed_frame = base64.b64decode(data["frame_b64"])
+            except Exception as e:
+                print(f"[SYNC] Lỗi giải mã frame_b64: {e}")
+
+    return jsonify({"success": True, "message": "Synced successfully"}), 200
 
 @app.route('/api/tts')
 def api_tts():
@@ -660,6 +702,52 @@ def api_play_track():
             pending_track_cmd = track
         return jsonify({"success": True, "track": track, "queued": True}), 200
     return jsonify({"success": False, "error": "Track không hợp lệ (1-4)"}), 400
+
+# ================= ĐỒNG BỘ LOCAL -> CLOUD RENDER (EDGE - CLOUD HYBRID) =================
+IS_RENDER_ENV = (
+    os.environ.get("RENDER", "").lower() == "true"
+    or "RENDER_EXTERNAL_HOSTNAME" in os.environ
+    or "RENDER_SERVICE_ID" in os.environ
+)
+CLOUD_SYNC_ENDPOINT = os.environ.get("CLOUD_SYNC_URL", "https://ai-sitting-posture-1.onrender.com/api/sync")
+
+def background_cloud_sync():
+    """Chạy ngầm trên máy tính Local: Cứ mỗi 1 giây đẩy 1 frame và dữ liệu lên Cloud Render"""
+    import base64
+    if IS_RENDER_ENV:
+        return  # Đang chạy trên Render thì không tự sync lên chính nó
+
+    print(f"[HYBRID] Đã kích hoạt luồng đồng bộ Cloud -> {CLOUD_SYNC_ENDPOINT}")
+    last_sync_time = 0
+
+    while True:
+        time.sleep(0.5)
+        now = time.time()
+        # Đồng bộ định kỳ mỗi 1.0 giây khi có dữ liệu camera
+        if now - last_sync_time < 1.0:
+            continue
+
+        payload = None
+        with data_lock:
+            if latest_processed_frame is not None and (now - last_camera_packet_time <= 8):
+                try:
+                    payload = {
+                        "status_data": dict(status_data),
+                        "frame_b64": base64.b64encode(latest_processed_frame).decode('utf-8')
+                    }
+                except Exception:
+                    pass
+
+        if payload:
+            try:
+                r = requests.post(CLOUD_SYNC_ENDPOINT, json=payload, timeout=3.5)
+                if r.status_code == 200:
+                    last_sync_time = now
+            except Exception:
+                pass
+
+sync_thread = threading.Thread(target=background_cloud_sync, daemon=True)
+sync_thread.start()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
