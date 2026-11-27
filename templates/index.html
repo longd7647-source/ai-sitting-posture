@@ -838,15 +838,18 @@
                 // Cập nhật tình trạng tư thế
                 const statusTextEl = document.getElementById("postureStatusText");
                 const timeDetailEl = document.getElementById("postureTimeDetail");
-                statusTextEl.innerText = data.status;
+                const postureDetail = data.posture_detail || data.status;
 
                 if (data.status === "Đúng tư thế") {
+                    statusTextEl.innerText = "Đúng tư thế";
                     statusTextEl.style.color = "var(--success)";
                     timeDetailEl.innerText = `Duy trì đúng tư thế: ${data.posture_time}s`;
                 } else if (data.status === "Sai tư thế") {
+                    statusTextEl.innerText = postureDetail;
                     statusTextEl.style.color = "var(--danger)";
                     timeDetailEl.innerText = `Sai tư thế liên tục: ${data.posture_time}s`;
                 } else {
+                    statusTextEl.innerText = data.status;
                     statusTextEl.style.color = "var(--warning)";
                     timeDetailEl.innerText = "Đang tìm cơ thể...";
                 }

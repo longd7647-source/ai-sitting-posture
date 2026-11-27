@@ -191,6 +191,20 @@ def calculate_angle_vertical(p1, p2):
     except Exception:
         return 0
 
+def calculate_signed_angle_vertical(p1, p2, facing_dir):
+    """
+    Tính góc nghiêng có dấu theo hướng mặt (facing_dir = +1 nhìn phải, -1 nhìn trái):
+    - Dương (+): Ngả/cúi về phía trước
+    - Âm (-): Ngửa ra phía sau
+    """
+    try:
+        dx = (p2[0] - p1[0]) * facing_dir
+        dy = abs(p2[1] - p1[1]) + 1e-6
+        angle = int(m.degrees(m.atan2(abs(dx), dy)))
+        return angle if dx >= 0 else -angle
+    except Exception:
+        return 0
+
 def calculate_angle_horizontal(p1, p2):
     """Tính góc nghiêng của đường thẳng p1->p2 so với phương ngang (độ)"""
     try:
@@ -301,6 +315,8 @@ def process_single_frame(image):
     neck_angle = 0
     torso_angle = 0
     posture_status = "Đang tìm cơ thể..."
+    posture_type = "KHÔNG RÕ"
+    posture_detail = "Đang tìm cơ thể..."
     posture_time = 0
     error_msg = ""
     should_alert = False
@@ -330,7 +346,7 @@ def process_single_frame(image):
 
         hip_visible = (hip_lm.visibility >= 0.55 and hip_pt[1] < h - 20)
 
-        # 2. Xử lý thuật toán thích ứng theo từng góc camera
+        # 2. Xử lý thuật toán thích ứng theo từng góc camera (phân biệt rõ Quá cúi vs Ngửa ra sau)
         if view_type == "FRONT":
             camera_view_label = "Chính diện (Frontal)"
             ls_pt = keypoints.get('LEFT_SHOULDER', (0, 0))
@@ -345,48 +361,64 @@ def process_single_frame(image):
             slouch_forward = (nose_shoulder_dist < 45)
 
             is_bad = (neck_angle >= 14 or torso_angle >= 10 or slouch_forward)
-            if neck_angle >= 14:
-                error_msg += f"Nghiêng đầu ({neck_angle}°). "
-            if torso_angle >= 10:
-                error_msg += f"Lệch vai ({torso_angle}°). "
             if slouch_forward:
-                error_msg += "Cúi sát màn hình. "
+                posture_type = "QUÁ CÚI"
+                posture_detail = "Cúi sát màn hình"
+                error_msg = "Bạn đang cúi quá sát màn hình. Hãy lùi người ra sau!"
+            elif neck_angle >= 14 or torso_angle >= 10:
+                posture_type = "NGHIÊNG LỆCH"
+                posture_detail = "Nghiêng đầu / Lệch vai"
+                error_msg = f"Nghiêng đầu ({neck_angle}°) hoặc lệch vai ({torso_angle}°). Hãy ngồi cân bằng!"
+            else:
+                posture_type = "CHUẨN"
+                posture_detail = "Đúng tư thế"
 
-        elif "DIAGONAL" in view_type:
+        else: # DIAGONAL hoặc SIDE (góc nhìn ngang/chéo - phân biệt 2 lỗi chính: Quá cúi vs Ngửa ra sau)
             side_name = "Hông Trái" if use_left else "Hông Phải"
-            camera_view_label = f"Chéo Bàn 3/4 ({side_name})"
-            neck_angle = calculate_angle_vertical(shoulder_pt, ear_pt)
+            if "DIAGONAL" in view_type:
+                camera_view_label = f"Chéo Bàn 3/4 ({side_name})"
+                neck_fwd_thresh = 32
+                torso_fwd_thresh = 18
+            else:
+                camera_view_label = f"Ngang Hông 90° ({side_name})"
+                neck_fwd_thresh = 35
+                torso_fwd_thresh = 16
+
+            # Hướng mặt (+1 nếu mặt quay sang phải, -1 nếu quay sang trái)
+            facing_dir = 1 if nose_pt[0] >= ear_pt[0] else -1
+            neck_signed = calculate_signed_angle_vertical(shoulder_pt, ear_pt, facing_dir)
+            neck_angle = abs(neck_signed)
 
             if hip_visible:
-                torso_angle = calculate_angle_vertical(hip_pt, shoulder_pt)
-                is_bad = (neck_angle >= 32 or torso_angle >= 18)
-                if torso_angle >= 18:
-                    error_msg += f"Lưng nghiêng ({torso_angle}°). "
+                torso_signed = calculate_signed_angle_vertical(hip_pt, shoulder_pt, facing_dir)
+                torso_angle = abs(torso_signed)
             else:
-                head_forward_offset = abs(ear_pt[0] - shoulder_pt[0])
-                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt)
-                is_bad = (neck_angle >= 32 or head_forward_offset > 55)
-                if head_forward_offset > 55:
-                    error_msg += "Gù lưng/nhô đầu ra trước. "
+                torso_signed = calculate_signed_angle_vertical(shoulder_pt, nose_pt, facing_dir)
+                torso_angle = abs(torso_signed)
 
-            if neck_angle >= 32:
-                error_msg += f"Cổ quá cúi ({neck_angle}°). "
+            head_forward_offset = (ear_pt[0] - shoulder_pt[0]) * facing_dir
 
-        else: # SIDE_LEFT hoặc SIDE_RIGHT (90 độ)
-            side_name = "Hông Trái" if use_left else "Hông Phải"
-            camera_view_label = f"Ngang Hông 90° ({side_name})"
-            neck_angle = calculate_angle_vertical(shoulder_pt, ear_pt)
-            if hip_visible:
-                torso_angle = calculate_angle_vertical(hip_pt, shoulder_pt)
-                is_bad = (neck_angle >= 35 or torso_angle >= 15)
-                if torso_angle >= 15:
-                    error_msg += f"Lưng nghiêng ({torso_angle}°). "
+            # Lỗi 1: Ngửa ra sau quá mức (trượt dài / dựa ghế quá sâu >= 18°)
+            is_lean_back = (hip_visible and torso_signed <= -18) or (not hip_visible and neck_signed <= -22)
+            # Lỗi 2: Quá cúi / Gù lưng về phía trước
+            is_lean_forward = (
+                (neck_signed >= neck_fwd_thresh)
+                or (hip_visible and torso_signed >= torso_fwd_thresh)
+                or (not hip_visible and head_forward_offset > 55)
+            )
+
+            is_bad = is_lean_back or is_lean_forward
+            if is_lean_back:
+                posture_type = "NGỬA RA SAU"
+                posture_detail = "Ngửa ra sau quá mức"
+                error_msg = f"Ngửa người ra sau quá mức ({torso_angle}°). Hãy ngồi ngay ngắn lại, tránh trượt dài trên ghế!"
+            elif is_lean_forward:
+                posture_type = "QUÁ CÚI"
+                posture_detail = "Quá cúi / Gù lưng"
+                error_msg = f"Ngồi quá cúi / Gù lưng (Cổ {neck_angle}°, Lưng {torso_angle}°). Hãy ngẩng đầu và ngồi thẳng lưng lên!"
             else:
-                torso_angle = calculate_angle_vertical(shoulder_pt, nose_pt)
-                is_bad = (neck_angle >= 35)
-
-            if neck_angle >= 35:
-                error_msg += f"Cổ quá cúi ({neck_angle}°). "
+                posture_type = "CHUẨN"
+                posture_detail = "Đúng tư thế"
 
         # 3. Đánh giá trạng thái thời gian và cảnh báo
         if not is_bad:
@@ -444,12 +476,14 @@ def process_single_frame(image):
         image = draw_multiple_texts_vietnamese(image, [
             (f"Cổ: {neck_angle}° | Lưng: {torso_angle}°", (15, 25), 22, color),
             (f"Góc cam: {camera_view_label}", (15, 55), 18, (255, 255, 255)),
-            (f"{posture_status}: {posture_time}s", (15, h - 35), 24, color),
+            (f"{posture_detail}: {posture_time}s", (15, h - 35), 22, color),
             (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
         ])
 
     else:
         posture_status = "Không phát hiện người"
+        posture_type = "KHÔNG RÕ"
+        posture_detail = "Không phát hiện người"
         good_start_time = None
         bad_start_time = None
         vn_time_str = datetime.now(VN_TZ).strftime("%H:%M:%S")
@@ -458,19 +492,20 @@ def process_single_frame(image):
             (f"Giờ VN: {vn_time_str}", (w - 180, h - 35), 20, (255, 255, 255))
         ])
 
-    ret, jpeg_buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    ret, jpeg_buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
     frame_bytes = jpeg_buffer.tobytes()
 
-    alert_track = 2
-    has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
-    has_bad_torso = (torso_angle >= 18) or (not hip_visible and head_forward_offset > 55)
-
-    if has_bad_neck and has_bad_torso:
+    if posture_type == "NGỬA RA SAU":
         alert_track = 4
-    elif has_bad_torso:
-        alert_track = 3
-    elif has_bad_neck:
-        alert_track = 2
+    elif posture_type == "QUÁ CÚI":
+        has_bad_neck = (neck_angle >= 32) or (view_type == "FRONT" and neck_angle >= 14)
+        has_bad_torso = (torso_angle >= 16) or (not hip_visible and head_forward_offset > 55)
+        if has_bad_neck and has_bad_torso:
+            alert_track = 4
+        elif has_bad_torso:
+            alert_track = 3
+        else:
+            alert_track = 2
     else:
         alert_track = 4
 
@@ -491,6 +526,8 @@ def process_single_frame(image):
         latest_processed_frame = frame_bytes
         status_data = {
             "status": posture_status,
+            "posture_type": posture_type,
+            "posture_detail": posture_detail,
             "camera_view": camera_view_label,
             "neck_angle": neck_angle,
             "torso_angle": torso_angle,
@@ -510,6 +547,8 @@ def process_single_frame(image):
 
     return {
         "status": posture_status,
+        "posture_type": posture_type,
+        "posture_detail": posture_detail,
         "error_msg": error_msg.strip(),
         "camera_view": camera_view_label,
         "neck_angle": neck_angle,
