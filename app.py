@@ -21,6 +21,13 @@ except ImportError:
 
 app = Flask(__name__)
 
+# Nhận diện môi trường Render Cloud hay máy tính Local (Edge)
+IS_RENDER_ENV = (
+    os.environ.get("RENDER", "").lower() == "true"
+    or "RENDER_EXTERNAL_HOSTNAME" in os.environ
+    or "RENDER_SERVICE_ID" in os.environ
+)
+
 # Khởi tạo MediaPipe Pose tối ưu tốc độ cao (Video Tracking Mode + Lite Model)
 pose = mp_pose.Pose(
     static_image_mode=False,
@@ -36,7 +43,7 @@ data_lock = threading.Lock()
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "app_config.json")
 
 default_settings = {
-    "esp32_ip": "192.168.1.69",       # Địa chỉ IP của ESP32-S3 Cam
+    "esp32_ip": "10.247.173.81",       # Địa chỉ IP của ESP32-S3 Cam (tự động cập nhật)
     "bad_posture_threshold_sec": 300,  # Mặc định 5 phút (300 giây) sai liên tục mới cảnh báo
     "alert_cooldown_sec": 60,          # Nhắc lại sau mỗi 60 giây nếu chưa sửa tư thế
     "speaker_enabled": True,           # Cho phép còi loa ESP32 kêu
@@ -500,9 +507,26 @@ def upload_frame():
 # ================= KÉO LUỒNG VIDEO MJPEG TỪ ESP32 CỔNG 81 (25-30 FPS) =================
 import urllib.request
 
+def get_local_subnet_prefix():
+    """Lấy tiền tố mạng LAN hiện tại của máy tính, ví dụ: 10.247.173. hoặc 192.168.1."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        parts = local_ip.split('.')
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}."
+    except Exception:
+        pass
+    return "10.247.173."
+
 def auto_discover_esp32_ip():
     """Tự động quét nhanh dải IP mạng LAN để tìm ESP32 nếu IP bị thay đổi"""
     found_ip = None
+    prefix = get_local_subnet_prefix()
+
     def _probe(ip_str):
         nonlocal found_ip
         if found_ip: return
@@ -514,8 +538,9 @@ def auto_discover_esp32_ip():
             pass
 
     threads = []
-    for i in range(50, 95):
-        t = threading.Thread(target=_probe, args=(f"192.168.1.{i}",), daemon=True)
+    scan_list = list(range(75, 95)) + list(range(50, 75)) + list(range(2, 50)) + list(range(95, 200))
+    for i in scan_list:
+        t = threading.Thread(target=_probe, args=(f"{prefix}{i}",), daemon=True)
         threads.append(t)
         t.start()
     for t in threads:
@@ -531,43 +556,44 @@ def esp32_stream_worker():
     consecutive_errs = 0
 
     while True:
-        esp_ip = system_settings.get("esp32_ip", "192.168.1.69")
+        esp_ip = system_settings.get("esp32_ip", "10.247.173.81")
         url = f"http://{esp_ip}:81/stream"
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'ESP32Client'})
-            stream = urllib.request.urlopen(req, timeout=4.0)
-            bytes_data = b""
-            print(f"[STREAM WORKER] ✅ Đã kết nối thành công tới luồng video: {url}")
-            consecutive_errs = 0
+            r = requests.get(url, stream=True, timeout=5.0)
+            if r.status_code == 200:
+                print(f"[STREAM WORKER] ✅ Đã kết nối thành công tới luồng video: {url}")
+                consecutive_errs = 0
+                bytes_data = b""
 
-            while True:
-                chunk = stream.read(4096)
-                if not chunk:
-                    break
-                bytes_data += chunk
-                a = bytes_data.find(b'\xff\xd8') # JPEG SOI
-                b = bytes_data.find(b'\xff\xd9') # JPEG EOI
-                if a != -1 and b != -1 and b > a:
-                    jpg = bytes_data[a:b+2]
-                    bytes_data = bytes_data[b+2:]
-                    arr = np.frombuffer(jpg, dtype=np.uint8)
-                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        process_single_frame(img)
-
+                for chunk in r.iter_content(chunk_size=4096):
+                    if not chunk:
+                        break
+                    bytes_data += chunk
+                    a = bytes_data.find(b'\xff\xd8') # JPEG SOI
+                    b = bytes_data.find(b'\xff\xd9') # JPEG EOI
+                    if a != -1 and b != -1 and b > a:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        arr = np.frombuffer(jpg, dtype=np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            process_single_frame(img)
+            else:
+                consecutive_errs += 1
         except Exception as e:
             consecutive_errs += 1
-            if consecutive_errs >= 3:
-                try:
-                    new_ip = auto_discover_esp32_ip()
-                    if new_ip and new_ip != esp_ip:
-                        print(f"[AUTO DISCOVER] Phát hiện ESP32 ở IP mới: {new_ip}")
-                        system_settings["esp32_ip"] = new_ip
-                        save_system_settings(system_settings)
-                        consecutive_errs = 0
-                except Exception:
-                    pass
-            time.sleep(1.2)
+
+        if consecutive_errs >= 3:
+            try:
+                new_ip = auto_discover_esp32_ip()
+                if new_ip and new_ip != esp_ip:
+                    print(f"[AUTO DISCOVER] Phát hiện ESP32 ở IP mới: {new_ip}")
+                    system_settings["esp32_ip"] = new_ip
+                    save_system_settings(system_settings)
+                    consecutive_errs = 0
+            except Exception:
+                pass
+        time.sleep(1.0)
 
 stream_thread = threading.Thread(target=esp32_stream_worker, daemon=True)
 stream_thread.start()
@@ -784,11 +810,6 @@ def api_esp32_ip():
     return jsonify({"esp32_ip": system_settings.get("esp32_ip", "192.168.1.69")})
 
 # ================= ĐỒNG BỘ LOCAL -> CLOUD RENDER (EDGE - CLOUD HYBRID) =================
-IS_RENDER_ENV = (
-    os.environ.get("RENDER", "").lower() == "true"
-    or "RENDER_EXTERNAL_HOSTNAME" in os.environ
-    or "RENDER_SERVICE_ID" in os.environ
-)
 CLOUD_SYNC_ENDPOINT = os.environ.get("CLOUD_SYNC_URL", "https://ai-sitting-posture-1.onrender.com/api/sync")
 
 def background_cloud_sync():

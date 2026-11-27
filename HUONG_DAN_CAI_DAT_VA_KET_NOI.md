@@ -21,8 +21,8 @@ Tài liệu này hướng dẫn chi tiết cách đấu nối phần cứng, n�
     (K4)   [4] |        JQ6500-16P          | [13]  ADC_R
     (K5)   [5] |        VOICE MODULE        | [12]  VCC   <--- 5V ESP32 / Nguồn ngoài
   (SGND)   [6] |                            | [11]  GND   <--- GND ESP32
- (ADKEY)   [7] |                            | [10]  TX    ---> GPIO 2 (RX) ESP32
-  (BUSY)   [8] |                            | [ 9]  RX    <--- Trở 1kΩ <--- GPIO 41 (TX) ESP32
+ (ADKEY)   [7] |                            | [10]  TX    ---> GPIO 42 (RX) ESP32
+  (BUSY)   [8] |                            | [ 9]  RX    <--- Trở 1kΩ (hoặc nối thẳng) <--- GPIO 41 (TX) ESP32
                +----------------------------+
 ```
 
@@ -31,8 +31,8 @@ Tài liệu này hướng dẫn chi tiết cách đấu nối phần cứng, n�
 | :--- | :--- | :--- | :--- |
 | **5V** (hoặc nguồn ngoài 5V) | **Chân 12 (VCC)** | *Chân 1 (VCC)* | Dây Đỏ: Cấp nguồn 5V cho JQ6500 |
 | **GND** | **Chân 11 (GND)** | *Chân 7 hoặc 10 (GND)* | Dây Đen: Nối chung mass (Ground) |
-| **GPIO 41** (TX) | **Chân 9 (RX)** | *Chân 2 (RX)* | Dây Vàng: Truyền dữ liệu UART *(nối tiếp trở 1kΩ để bảo vệ và chống dội áp)* |
-| **GPIO 42** (RX) | **Chân 10 (TX)** | *Chân 3 (TX)* | Dây Xanh: Nhận phản hồi trạng thái từ JQ6500 *(tùy chọn)* |
+| **GPIO 41** (TX) | **Chân 9 (RX)** | *Chân 2 (RX)* | Dây Vàng: Truyền dữ liệu UART *(nối tiếp trở 1kΩ hoặc nối thẳng đều an toàn vì ESP32-S3 xuất mức logic 3.3V; khi debug tín hiệu UART yếu nên thử nối thẳng không qua trở)* |
+| **GPIO 42** (RX) | **Chân 10 (TX)** | *Chân 3 (TX)* | Dây Xanh: Nhận phản hồi trạng thái từ JQ6500 *(nên nối để Serial Monitor đọc được gói phản hồi `[JQ6500 RX]`)* |
 | *Không nối ESP32* | **Chân 16 (SPK+)** | *Chân 6 (SPK_1)* | Nối vào cực dương (+) của Loa 3W (4Ω hoặc 8Ω) |
 | *Không nối ESP32* | **Chân 15 (SPK-)** | *Chân 8 (SPK_2)* | Nối vào cực âm (-) của Loa 3W |
 
@@ -122,26 +122,28 @@ Mã nguồn đã tích hợp sẵn **3 cách test loa tức thì** từ ESP32-S3
 
 2. **Cách 2: Test bằng bàn phím qua Serial Monitor (Khuyên dùng khi cắm máy tính):**
    - Mở **Serial Monitor** trong Arduino IDE (tốc độ `115200 baud`).
-   - Gõ phím `1` rồi nhấn Enter: Phát Track 1 (`001.mp3` - Cúi gập cổ).
-   - Gõ phím `2` rồi nhấn Enter: Phát Track 2 (`002.mp3` - Gù lưng).
-   - Gõ phím `3` rồi nhấn Enter: Phát Track 3 (`003.mp3` - Phối hợp cả cổ và lưng).
-   - Gõ phím `4` rồi nhấn Enter: Phát Track 4 (`004.mp3` - Tư thế 4 / Sẵn sàng).
-   - Gõ phím `+` hoặc `v` rồi nhấn Enter: Đặt âm lượng cực đại (30/30).
+   - Gõ phím `1` rồi nhấn Enter: Phát Track 1 (`001.mp3` - Khởi động thành công).
+   - Gõ phím `2` rồi nhấn Enter: Phát Track 2 (`002.mp3` - Cúi cổ quá sâu).
+   - Gõ phím `3` rồi nhấn Enter: Phát Track 3 (`003.mp3` - Gù lưng / đổ thân trước).
+   - Gõ phím `4` rồi nhấn Enter: Phát Track 4 (`004.mp3` - Sai tư thế phối hợp / lệch vai).
+   - Gõ phím `t` rồi nhấn Enter: Chạy chẩn đoán UART 2 chiều (hỏi số file Flash, âm lượng, trạng thái và thử phát Track 1).
+   - Gõ phím `p` rồi nhấn Enter: Gửi lệnh Play hiện tại (`0x0D`) để thử tương thích module.
+   - Gõ phím `+` hoặc `v` rồi nhấn Enter: Đặt âm lượng cực đại (30/30). Gõ `-`: Hạ âm lượng xuống 15/30 để kiểm tra sụt áp nguồn USB.
    - Gõ phím `s` rồi nhấn Enter: Dừng phát ngay lập tức.
 
 3. **Cách 3: Bấm nút test từ điện thoại / máy tính qua Web (Khi cùng mạng Wi-Fi):**
    - Mở trình duyệt web truy cập trực tiếp vào IP của ESP32 (ví dụ: `http://192.168.1.50/`).
    - Màn hình sẽ hiện giao diện điều khiển với 4 nút bấm kiểm tra lần lượt từng file âm thanh:
-     - `📢 Track 1: Cúi cổ quá sâu (001.mp3)`
-     - `📢 Track 2: Gù lưng / đổ trước (002.mp3)`
-     - `📢 Track 3: Sai tư thế phối hợp (003.mp3)`
-     - `📢 Track 4: Tư thế 4 / Sẵn sàng (004.mp3)`
+     - `📢 Track 1: Khởi động thành công (001.mp3)`
+     - `📢 Track 2: Cúi cổ quá sâu (002.mp3)`
+     - `📢 Track 3: Gù lưng / đổ trước (003.mp3)`
+     - `📢 Track 4: Sai tư thế phối hợp (004.mp3)`
      - `⏹️ Dừng phát âm thanh`
 
 4. **Cơ chế cảnh báo tự động khi phát hiện ngồi sai tư thế:**
    - Server AI liên tục phân tích góc cổ và lưng, tự động chọn mã bài hát phù hợp gửi về cho ESP32:
-     - Cúi gập cổ ($\ge 32^\circ$) $\rightarrow$ Loa tự phát Track 1 (`001.mp3`).
-     - Gù lưng / đổ thân trước ($\ge 18^\circ$) $\rightarrow$ Loa tự phát Track 2 (`002.mp3`).
-     - Sai phối hợp cả cổ và lưng $\rightarrow$ Loa tự phát Track 3 (`003.mp3`).
-     - Ngồi lệch vai / vẹo cột sống $\rightarrow$ Loa tự phát Track 4 (`004.mp3`).
+     - Khởi động mạch / sẵn sàng $\rightarrow$ Loa tự phát Track 1 (`001.mp3`).
+     - Cúi gập cổ ($\ge 32^\circ$, hoặc góc trực diện $\ge 14^\circ$) $\rightarrow$ Loa tự phát Track 2 (`002.mp3`).
+     - Gù lưng / đổ thân trước ($\ge 18^\circ$) $\rightarrow$ Loa tự phát Track 3 (`003.mp3`).
+     - Sai phối hợp cả cổ và lưng hoặc ngồi lệch vai / nghiêng người $\rightarrow$ Loa tự phát Track 4 (`004.mp3`).
    - Có thời gian giãn cách 6 giây giữa 2 lần cảnh báo để tránh âm thanh bị ngắt quãng hoặc nói chồng chéo.
