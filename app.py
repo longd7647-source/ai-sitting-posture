@@ -564,7 +564,7 @@ def esp32_stream_worker():
         esp_ip = system_settings.get("esp32_ip", "10.247.173.81")
         url = f"http://{esp_ip}:81/stream"
         try:
-            r = requests.get(url, stream=True, timeout=5.0)
+            r = requests.get(url, stream=True, timeout=(3.0, 8.0))
             if r.status_code == 200:
                 print(f"[STREAM WORKER] ✅ Đã kết nối thành công tới luồng video: {url}")
                 consecutive_errs = 0
@@ -574,10 +574,21 @@ def esp32_stream_worker():
                     if not chunk:
                         break
                     bytes_data += chunk
-                    a = bytes_data.find(b'\xff\xd8') # JPEG SOI
-                    b = bytes_data.find(b'\xff\xd9') # JPEG EOI
-                    if a != -1 and b != -1 and b > a:
-                        jpg = bytes_data[a:b+2]
+
+                    # Vòng lặp bóc tách toàn bộ khung hình JPEG có trong buffer (tránh tràn/kẹt buffer)
+                    while True:
+                        a = bytes_data.find(b'\xff\xd8') # JPEG SOI
+                        if a == -1:
+                            bytes_data = bytes_data[-1:] if len(bytes_data) > 0 else b""
+                            break
+                        if a > 0:
+                            bytes_data = bytes_data[a:]
+
+                        b = bytes_data.find(b'\xff\xd9', 2) # JPEG EOI sau SOI
+                        if b == -1:
+                            break
+
+                        jpg = bytes_data[:b+2]
                         bytes_data = bytes_data[b+2:]
                         arr = np.frombuffer(jpg, dtype=np.uint8)
                         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
