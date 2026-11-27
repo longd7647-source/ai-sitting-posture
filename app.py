@@ -243,34 +243,33 @@ def detect_camera_view(lm, w, h):
     elif forced_view == "front":
         return "FRONT", use_left
 
-    # TỰ ĐỘNG PHÂN BIỆT GÓC CHÍNH XÁC:
-    # 1. Kiểm tra vị trí mũi so với 2 vai:
-    # Khi nhìn nghiêng hoặc ngang hông, mặt quay về màn hình nên mũi chìa hẳn ra ngoài 2 vai:
+    # TỰ ĐỘNG PHÂN BIỆT GÓC CHÍNH XÁC (BẤT BIẾN THEO KHOẢNG CÁCH NGỒI XA/GẦN):
     min_sh_x = min(ls.x, rs.x)
     max_sh_x = max(ls.x, rs.x)
-    nose_outside = (nose.x < min_sh_x - 0.02) or (nose.x > max_sh_x + 0.02)
-
-    # 2. Khoảng cách ngang giữa tai rõ hơn và mũi (Profile depth)
-    visible_ear = le if use_left else re
-    ear_nose_dx = abs(visible_ear.x - nose.x)
-
-    # 3. Chênh lệch độ hiển thị giữa 2 tai
-    ear_vis_diff = abs(le.visibility - re.visibility)
+    mid_sh_x = (ls.x + rs.x) / 2.0
     shoulder_dx = abs(ls.x - rs.x)
 
-    # Nếu mũi nằm ngoài khoảng 2 vai HOẶC nhìn nghiêng rõ rệt (khoảng cách tai-mũi lớn, 1 tai bị che):
-    if nose_outside or ear_nose_dx > 0.09 or ear_vis_diff > 0.25:
-        # Nhận diện Ngang hông 90° vs Chéo 3/4
-        if ear_nose_dx > 0.11 or shoulder_dx < 0.22 or ear_vis_diff > 0.35:
-            return ("SIDE_LEFT" if use_left else "SIDE_RIGHT"), use_left
-        else:
-            return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
+    # Tỷ lệ lệch của mũi so với tâm 2 vai (0.0 = ngay chính giữa, >= 0.5 = sát mép vai hoặc ra ngoài)
+    nose_center_offset_ratio = abs(nose.x - mid_sh_x) / max(shoulder_dx, 0.05)
+    nose_outside = (nose.x < min_sh_x - 0.02) or (nose.x > max_sh_x + 0.02)
 
-    # Nếu mũi nằm giữa 2 vai, 2 tai đều nhìn thấy và vai dang rộng:
-    if not nose_outside and shoulder_dx > 0.25 and ear_vis_diff < 0.30:
+    visible_ear = le if use_left else re
+    ear_nose_dx = abs(visible_ear.x - nose.x)
+    ear_vis_diff = abs(le.visibility - re.visibility)
+
+    # 1. Ngang hông 90°: 2 vai chập vào nhau (shoulder_dx rất nhỏ), hoặc mũi chìa hẳn ra ngoài 2 vai, hoặc 1 tai bị che khuất hẳn
+    if shoulder_dx < 0.12 or nose_outside or ear_vis_diff > 0.45:
+        return ("SIDE_LEFT" if use_left else "SIDE_RIGHT"), use_left
+
+    # 2. Chính diện (Frontal): Mũi nằm gần tâm giữa 2 vai (lệch < 28% bề rộng vai)
+    if nose_center_offset_ratio < 0.28 and ear_vis_diff <= 0.40:
         return "FRONT", use_left
 
-    return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
+    # 3. Chéo bàn 3/4 (45°): Mũi lệch về một bên vai nhưng chưa vượt hẳn ra ngoài
+    if ear_nose_dx > 0.09 or nose_center_offset_ratio >= 0.28:
+        return ("DIAGONAL_LEFT" if use_left else "DIAGONAL_RIGHT"), use_left
+
+    return "FRONT", use_left
 
 def create_standby_frame(message="Đang chờ tín hiệu từ ESP32-S3 CAM..."):
     """Tạo khung hình nền đen chờ kết nối khi camera chưa bật"""
@@ -347,18 +346,22 @@ def process_single_frame(image):
         hip_visible = (hip_lm.visibility >= 0.55 and hip_pt[1] < h - 20)
 
         # 2. Xử lý thuật toán thích ứng theo từng góc camera (phân biệt rõ Quá cúi vs Ngửa ra sau)
+        ls_pt = keypoints.get('LEFT_SHOULDER', (0, 0))
+        rs_pt = keypoints.get('RIGHT_SHOULDER', (0, 0))
+        mid_shoulder_pt = ((ls_pt[0] + rs_pt[0]) // 2, (ls_pt[1] + rs_pt[1]) // 2)
+
         if view_type == "FRONT":
             camera_view_label = "Chính diện (Frontal)"
-            ls_pt = keypoints.get('LEFT_SHOULDER', (0, 0))
-            rs_pt = keypoints.get('RIGHT_SHOULDER', (0, 0))
             le_pt = keypoints.get('LEFT_EAR', (0, 0))
             re_pt = keypoints.get('RIGHT_EAR', (0, 0))
 
             neck_angle = calculate_angle_horizontal(le_pt, re_pt)
             torso_angle = calculate_angle_horizontal(ls_pt, rs_pt)
 
-            nose_shoulder_dist = abs(nose_pt[1] - (ls_pt[1] + rs_pt[1]) / 2.0)
-            slouch_forward = (nose_shoulder_dist < 45)
+            shoulder_width_px = abs(ls_pt[0] - rs_pt[0])
+            nose_shoulder_dist = abs(nose_pt[1] - mid_shoulder_pt[1])
+            nose_shoulder_ratio = nose_shoulder_dist / max(shoulder_width_px, 1.0)
+            slouch_forward = (nose_shoulder_ratio < 0.30)
 
             is_bad = (neck_angle >= 14 or torso_angle >= 10 or slouch_forward)
             if slouch_forward:
@@ -379,31 +382,36 @@ def process_single_frame(image):
                 camera_view_label = f"Chéo Bàn 3/4 ({side_name})"
                 neck_fwd_thresh = 32
                 torso_fwd_thresh = 18
+                # Dùng tâm 2 vai (mid_shoulder_pt) để loại bỏ sai số chiều ngang vai ở góc 45°
+                neck_base_pt = mid_shoulder_pt
             else:
                 camera_view_label = f"Ngang Hông 90° ({side_name})"
                 neck_fwd_thresh = 35
                 torso_fwd_thresh = 16
+                neck_base_pt = shoulder_pt
 
             # Hướng mặt (+1 nếu mặt quay sang phải, -1 nếu quay sang trái)
             facing_dir = 1 if nose_pt[0] >= ear_pt[0] else -1
-            neck_signed = calculate_signed_angle_vertical(shoulder_pt, ear_pt, facing_dir)
+            neck_signed = calculate_signed_angle_vertical(neck_base_pt, ear_pt, facing_dir)
             neck_angle = abs(neck_signed)
 
             if hip_visible:
                 torso_signed = calculate_signed_angle_vertical(hip_pt, shoulder_pt, facing_dir)
                 torso_angle = abs(torso_signed)
             else:
-                torso_signed = calculate_signed_angle_vertical(shoulder_pt, nose_pt, facing_dir)
+                # Khi bàn che khuất hông, đo từ tâm 2 vai tới mũi để không bị cộng thêm nửa bề rộng vai
+                torso_signed = calculate_signed_angle_vertical(mid_shoulder_pt, nose_pt, facing_dir)
                 torso_angle = abs(torso_signed)
 
-            head_forward_offset = (ear_pt[0] - shoulder_pt[0]) * facing_dir
+            head_forward_offset = (ear_pt[0] - neck_base_pt[0]) * facing_dir
 
             # Lỗi 1: Ngửa ra sau quá mức (trượt dài / dựa ghế quá sâu >= 18°)
             is_lean_back = (hip_visible and torso_signed <= -18) or (not hip_visible and neck_signed <= -22)
             # Lỗi 2: Quá cúi / Gù lưng về phía trước
+            torso_check_thresh = torso_fwd_thresh if hip_visible else 28
             is_lean_forward = (
                 (neck_signed >= neck_fwd_thresh)
-                or (hip_visible and torso_signed >= torso_fwd_thresh)
+                or (torso_signed >= torso_check_thresh)
                 or (not hip_visible and head_forward_offset > 55)
             )
 
